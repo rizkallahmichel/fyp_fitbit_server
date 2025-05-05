@@ -1,0 +1,6 @@
+@FitServer_HostAddress = http://localhost:5290
+
+GET {{FitServer_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
