@@ -25,6 +25,49 @@ namespace FitServer.Controllers
             return Ok(data);
         }
 
+
+        [HttpGet("heart-rate/intraday")]
+        public async Task<IActionResult> GetIntradayHeartRate()
+        {
+            var accessToken = HttpContext.Items["AccessToken"] as string;
+            if (string.IsNullOrEmpty(accessToken))
+                return Unauthorized("No access token available.");
+
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            string url = $"https://api.fitbit.com/1/user/-/activities/heart/date/{today}/1d/1sec.json";
+
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await httpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
+
+            var json = await response.Content.ReadAsStringAsync();
+
+            List<object> fiveValues;
+
+            using (var document = JsonDocument.Parse(json))
+            {
+                var root = document.RootElement;
+                if (!root.TryGetProperty("activities-heart-intraday", out var intraday) ||
+                    !intraday.TryGetProperty("dataset", out var dataset))
+                {
+                    return NotFound("Intraday heart rate dataset not found.");
+                }
+
+                fiveValues = dataset.EnumerateArray().Take(5).Select(item => new
+                {
+                    time = item.GetProperty("time").GetString(),
+                    value = item.GetProperty("value").GetInt32()
+                }).Cast<object>().ToList();
+            }
+
+            return Ok(fiveValues);
+        }
+
+
+
         [HttpPost("heart-rate")]
         public async Task<IActionResult> GetHeartRate()
         {
@@ -32,16 +75,14 @@ namespace FitServer.Controllers
         }
 
         [HttpGet("sleep")]
-        public async Task<IActionResult> GetSleep([FromQuery] string date)
+        public async Task<IActionResult> GetSleep()
         {
             var accessToken = HttpContext.Items["AccessToken"] as string;
             if (string.IsNullOrEmpty(accessToken))
                 return Unauthorized("No access token available.");
 
-            if (!DateTime.TryParse(date, out var parsedDate))
-                return BadRequest("Invalid date format. Use yyyy-MM-dd.");
-
-            string formattedDate = parsedDate.ToString("yyyy-MM-dd");
+            // Get today's date in UTC (Fitbit uses UTC-based logs)
+            string formattedDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
 
             using var httpClient = new HttpClient();
             httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -55,25 +96,26 @@ namespace FitServer.Controllers
             return Ok(data);
         }
 
-        [HttpGet("stress-management")]
-        public async Task<IActionResult> GetStressManagement()
-        {
-            var accessToken = HttpContext.Items["AccessToken"] as string;
-            if (string.IsNullOrEmpty(accessToken))
-                return Unauthorized("No access token available.");
 
-            using var httpClient = new HttpClient();
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        // [HttpGet("stress-management")]
+        // public async Task<IActionResult> GetStressManagement()
+        // {
+        //     var accessToken = HttpContext.Items["AccessToken"] as string;
+        //     if (string.IsNullOrEmpty(accessToken))
+        //         return Unauthorized("No access token available.");
 
-            var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-            var response = await httpClient.GetAsync($"https://api.fitbit.com/1/user/-/stressManagement/date/{today}.json");
+        //     using var httpClient = new HttpClient();
+        //     httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
-            if (!response.IsSuccessStatusCode)
-                return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
+        //     var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        //     var response = await httpClient.GetAsync($"https://api.fitbit.com/1/user/-/stressManagement/date/{today}.json");
 
-            var data = await response.Content.ReadAsStringAsync();
-            return Ok(data);
-        }
+        //     if (!response.IsSuccessStatusCode)
+        //         return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
+
+        //     var data = await response.Content.ReadAsStringAsync();
+        //     return Ok(data);
+        // }
 
         [HttpGet("hrv")]
         public async Task<IActionResult> GetHRV()
@@ -181,9 +223,8 @@ namespace FitServer.Controllers
                 return Unauthorized("No access token available.");
 
             // Adjust these dates as needed (must be within the range Fitbit has data for)
-            string startDate = "2025-05-01";
-            string endDate = "2025-05-05";
-            string url = $"https://api.fitbit.com/1/user/-/br/date/{startDate}/{endDate}.json";
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            string url = $"https://api.fitbit.com/1/user/-/br/date/{today}/{today}.json";
 
             using var httpClient = new HttpClient();
             httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);

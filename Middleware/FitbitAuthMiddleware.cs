@@ -6,8 +6,7 @@ using System.Text.Json;
 public class FitbitAuthMiddleware
 {
     private readonly RequestDelegate _next;
-    private static string? _accessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJyZXMgcm94eSByaHIgcnBybyBydGVtIHJzbGUiLCJleHAiOjE3NDY0NzYwNTYsImlhdCI6MTc0NjQ0NzI1Nn0.Rdn_T7f-F0tikRxV72qWTlY5pakIZFb_mDD__KKP20k";
-    //private static string? _accessToken;
+    private static string? _accessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJyZXMgcm94eSByaHIgcnBybyByc2xlIHJ0ZW0iLCJleHAiOjE3NDc1Mjk5OTIsImlhdCI6MTc0NzUwMTE5Mn0.DRo__W5y68mCps0Mdnlk4ZnUvR8bY_k_huvJ8wMEAGQ";
     private static string? _refreshToken;
 
     public FitbitAuthMiddleware(RequestDelegate next)
@@ -19,7 +18,18 @@ public class FitbitAuthMiddleware
     {
         if (string.IsNullOrEmpty(_accessToken) || !await IsTokenValid(_accessToken))
         {
-            await RefreshTokenAsync();
+            if (!string.IsNullOrEmpty(_refreshToken))
+            {
+                var refreshed = await TryRefreshTokenAsync();
+                if (!refreshed)
+                {
+                    await RequestNewTokenAsync(); // fallback to full flow
+                }
+            }
+            else
+            {
+                await RequestNewTokenAsync(); // initial token request
+            }
         }
 
         context.Items["AccessToken"] = _accessToken;
@@ -34,10 +44,36 @@ public class FitbitAuthMiddleware
         return response.IsSuccessStatusCode;
     }
 
-    private async Task RefreshTokenAsync()
+    private async Task<bool> TryRefreshTokenAsync()
     {
         var clientId = "23Q8NN";
-        var code = "aa83ee957e458f1a1fb2d30b5ea02e11295d2993";
+        var redirectUri = "http://localhost:8080/callback";
+
+        var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            { "grant_type", "refresh_token" },
+            { "refresh_token", _refreshToken ?? string.Empty },
+            { "client_id", clientId }
+        });
+
+        using var client = new HttpClient();
+        var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return false;
+        }
+
+        var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
+        _accessToken = responseData.GetProperty("access_token").GetString();
+        _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        return true;
+    }
+
+    private async Task RequestNewTokenAsync()
+    {
+        var clientId = "23Q8NN";
+        var code = "28c00fce3cade29233f8c231b18a2e8784b4fc8f"; 
         var codeVerifier = "81Oli40rwdNtdX6imBH80qtWVF1FHWSaiVJHz6g5O9A";
         var redirectUri = "http://localhost:8080/callback";
 
@@ -51,15 +87,12 @@ public class FitbitAuthMiddleware
         });
 
         using var client = new HttpClient();
-
-        // DO NOT set the Authorization header for PKCE
-        // client.DefaultRequestHeaders.Authorization = ...
-
         var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
+
         if (!response.IsSuccessStatusCode)
         {
             var error = await response.Content.ReadAsStringAsync();
-            throw new Exception($"Unable to refresh Fitbit token: {error}");
+            throw new Exception($"Unable to request new Fitbit token: {error}");
         }
 
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
