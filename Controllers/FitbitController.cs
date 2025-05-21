@@ -275,5 +275,26 @@ namespace FitServer.Controllers
             return Ok(json);
         }
 
+        [HttpGet("steps")]
+        public async Task<IActionResult> GetSteps()
+        {
+            var accessToken = HttpContext.Items["AccessToken"] as string;
+            if (string.IsNullOrEmpty(accessToken))
+                return Unauthorized("No access token available.");
+
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            string url = $"https://api.fitbit.com/1/user/-/activities/steps/date/{today}/1d.json";
+
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await httpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
+
+            var data = await response.Content.ReadAsStringAsync();
+            return Ok(data);
+        }
+
     }
 }

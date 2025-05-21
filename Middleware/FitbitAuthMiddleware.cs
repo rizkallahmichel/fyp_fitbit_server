@@ -6,7 +6,7 @@ using System.Text.Json;
 public class FitbitAuthMiddleware
 {
     private readonly RequestDelegate _next;
-    private static string? _accessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJyZXMgcm94eSByaHIgcnBybyByc2xlIHJ0ZW0iLCJleHAiOjE3NDc1Mjk5OTIsImlhdCI6MTc0NzUwMTE5Mn0.DRo__W5y68mCps0Mdnlk4ZnUvR8bY_k_huvJ8wMEAGQ";
+    private static string? _accessToken;
     private static string? _refreshToken;
 
     public FitbitAuthMiddleware(RequestDelegate next)
@@ -73,7 +73,7 @@ public class FitbitAuthMiddleware
     private async Task RequestNewTokenAsync()
     {
         var clientId = "23Q8NN";
-        var code = "28c00fce3cade29233f8c231b18a2e8784b4fc8f"; 
+        var code = "dbaaacbab5121f8d22d82e1e78885e30831874aa"; 
         var codeVerifier = "81Oli40rwdNtdX6imBH80qtWVF1FHWSaiVJHz6g5O9A";
         var redirectUri = "http://localhost:8080/callback";
 
