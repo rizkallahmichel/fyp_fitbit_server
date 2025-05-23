@@ -96,27 +96,6 @@ namespace FitServer.Controllers
             return Ok(data);
         }
 
-
-        // [HttpGet("stress-management")]
-        // public async Task<IActionResult> GetStressManagement()
-        // {
-        //     var accessToken = HttpContext.Items["AccessToken"] as string;
-        //     if (string.IsNullOrEmpty(accessToken))
-        //         return Unauthorized("No access token available.");
-
-        //     using var httpClient = new HttpClient();
-        //     httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-        //     var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        //     var response = await httpClient.GetAsync($"https://api.fitbit.com/1/user/-/stressManagement/date/{today}.json");
-
-        //     if (!response.IsSuccessStatusCode)
-        //         return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
-
-        //     var data = await response.Content.ReadAsStringAsync();
-        //     return Ok(data);
-        // }
-
         [HttpGet("hrv")]
         public async Task<IActionResult> GetHRV()
         {
@@ -137,60 +116,11 @@ namespace FitServer.Controllers
             return Ok(data);
         }
 
-        /*[HttpGet("eda")]
-        public async Task<IActionResult> GetEDA()
-        {
-            var accessToken = HttpContext.Items["AccessToken"] as string;
-            if (string.IsNullOrEmpty(accessToken))
-                return Unauthorized("No access token available.");
-
-            using var httpClient = new HttpClient();
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-            var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-            var url = $"https://api.fitbit.com/1/user/-/eda/date/{today}.json";
-            var response = await httpClient.GetAsync(url);
-
-            if (!response.IsSuccessStatusCode)
-                return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
-
-            var data = await response.Content.ReadAsStringAsync();
-            return Ok(data);
-        }*/
-
-
-        /*[HttpPost("hrv")]
-        public async Task<IActionResult> GetHRV()
-        {
-            return await FetchFitbitData("https://api.fitbit.com/1/user/-/hrv/date/today.json");
-        }
-*/
         [HttpPost("resting-heart-rate")]
         public async Task<IActionResult> GetRestingHeartRate()
         {
             return await FetchFitbitData("https://api.fitbit.com/1/user/-/activities/heart/date/today/1d.json");
         }
-
-        /*[HttpGet("mindfulness")]
-        public async Task<IActionResult> GetMindfulness()
-        {
-            var accessToken = HttpContext.Items["AccessToken"] as string;
-            if (string.IsNullOrEmpty(accessToken))
-                return Unauthorized("No access token available.");
-
-            using var httpClient = new HttpClient();
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-            var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-            var url = $"https://api.fitbit.com/1/user/-/mindfulness/date/{today}.json";
-            var response = await httpClient.GetAsync(url);
-
-            if (!response.IsSuccessStatusCode)
-                return StatusCode((int)response.StatusCode, await response.Content.ReadAsStringAsync());
-
-            var data = await response.Content.ReadAsStringAsync();
-            return Ok(data);
-        }*/
 
 
         [HttpGet("activity")]

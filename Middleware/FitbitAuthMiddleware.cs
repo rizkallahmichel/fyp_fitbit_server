@@ -8,10 +8,11 @@ public class FitbitAuthMiddleware
     private readonly RequestDelegate _next;
     private static string? _accessToken;
     private static string? _refreshToken;
-
-    public FitbitAuthMiddleware(RequestDelegate next)
+    private readonly IConfiguration _configuration;
+    public FitbitAuthMiddleware(RequestDelegate next, IConfiguration configuration)
     {
         _next = next;
+        _configuration = configuration;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -46,8 +47,8 @@ public class FitbitAuthMiddleware
 
     private async Task<bool> TryRefreshTokenAsync()
     {
-        var clientId = "23Q8NN";
-        var redirectUri = "http://localhost:8080/callback";
+        var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -72,10 +73,10 @@ public class FitbitAuthMiddleware
 
     private async Task RequestNewTokenAsync()
     {
-        var clientId = "23Q8NN";
-        var code = "dbaaacbab5121f8d22d82e1e78885e30831874aa"; 
-        var codeVerifier = "81Oli40rwdNtdX6imBH80qtWVF1FHWSaiVJHz6g5O9A";
-        var redirectUri = "http://localhost:8080/callback";
+        var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var code = _configuration.GetValue<string>("Fitbit:Code");
+        var codeVerifier = _configuration.GetValue<string>("Fitbit:CodeVerifier");
+        var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {

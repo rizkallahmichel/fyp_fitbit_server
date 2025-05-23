@@ -13,7 +13,6 @@ namespace FitServer
 
             // Add services to the container.
             builder.Services.AddControllers();
-
             // Add Swagger
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen(c =>
@@ -24,6 +23,10 @@ namespace FitServer
                     Version = "v1"
                 });
             });
+            builder.Services.AddHttpContextAccessor();
+
+            builder.Services.AddSingleton<FirebaseService>();
+            builder.Services.AddHostedService<FitbitDataLoader>();
 
             // Add HttpClientFactory
             builder.Services.AddHttpClient();
@@ -38,15 +41,13 @@ namespace FitServer
 
             var app = builder.Build();
 
-            if (app.Environment.IsDevelopment())
+            app.UseSwagger();
+            app.UseSwaggerUI(c =>
             {
-                app.UseSwagger();
-                app.UseSwaggerUI(c =>
-                {
-                    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Fitbit API V1");
-                    c.RoutePrefix = string.Empty; // This sets Swagger UI to open at https://localhost:7200/
-                });
-            }
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "Fitbit API V1");
+                c.RoutePrefix = string.Empty;
+            });
+
 
 
             app.UseHttpsRedirection();
