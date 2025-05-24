@@ -43,6 +43,26 @@ public class FitbitDataLoader : IHostedService
         }
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
 
+        var body = await response.Content.ReadAsStringAsync();
+        var json = JsonDocument.Parse(body).RootElement;
+
+        var accessToken = json.GetProperty("access_token").GetString();
+        var refreshToken = json.GetProperty("refresh_token").GetString();
+        var expiresIn = json.GetProperty("expires_in").GetInt32();
+        var timestamp = DateTime.UtcNow;
+
+        var tokenData = new
+        {
+            access_token = accessToken,
+            refresh_token = refreshToken,
+            expires_in = expiresIn,
+            obtained_at = timestamp.ToString("o")
+        };
+
+        // Save tokens locally (e.g. to file)
+        var jsonStr = JsonSerializer.Serialize(tokenData, new JsonSerializerOptions { WriteIndented = true });
+        await File.WriteAllTextAsync("fitbit_tokens.json", jsonStr);
+
         return responseData.GetProperty("access_token").GetString();
 
     }

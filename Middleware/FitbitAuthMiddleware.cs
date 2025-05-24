@@ -1,5 +1,4 @@
-﻿using Google.Api;
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -10,11 +9,13 @@ public class FitbitAuthMiddleware
     private static string? _accessToken;
     private static string? _refreshToken;
     private readonly IConfiguration _configuration;
+    private readonly string tokenFilePath = "fitbit_tokens.json";
 
     public FitbitAuthMiddleware(RequestDelegate next, IConfiguration configuration)
     {
         _next = next;
         _configuration = configuration;
+        LoadTokensFromFile();
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -71,6 +72,8 @@ public class FitbitAuthMiddleware
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        SaveTokensToFile();
+
         context.Items["AccessToken"] = _accessToken;
         context.Items["RefreshToken"] = _refreshToken;
         return true;
@@ -109,7 +112,47 @@ public class FitbitAuthMiddleware
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        SaveTokensToFile();
+
         context.Items["AccessToken"] = _accessToken;
         context.Items["RefreshToken"] = _refreshToken;
+    }
+
+    private void LoadTokensFromFile()
+    {
+        try
+        {
+            if (!File.Exists(tokenFilePath))
+                return;
+
+            var json = File.ReadAllText(tokenFilePath);
+            var data = JsonDocument.Parse(json).RootElement;
+
+            _accessToken = data.GetProperty("access_token").GetString();
+            _refreshToken = data.GetProperty("refresh_token").GetString();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to load tokens from file: {ex.Message}");
+        }
+    }
+
+    private void SaveTokensToFile()
+    {
+        try
+        {
+            var tokenData = new
+            {
+                access_token = _accessToken,
+                refresh_token = _refreshToken
+            };
+
+            var jsonStr = JsonSerializer.Serialize(tokenData, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(tokenFilePath, jsonStr);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to save tokens to file: {ex.Message}");
+        }
     }
 }

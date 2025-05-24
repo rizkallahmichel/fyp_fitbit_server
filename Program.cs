@@ -45,6 +45,16 @@ namespace FitServer
                 options.Cookie.IsEssential = true;
             });
 
+            builder.Services.AddCors(options =>
+            {
+                options.AddPolicy("AllowAll", policy =>
+                {
+                    policy.AllowAnyOrigin()
+                          .AllowAnyHeader()
+                          .AllowAnyMethod();
+                });
+            });
+
             var app = builder.Build();
 
             app.UseSwagger();
@@ -54,6 +64,7 @@ namespace FitServer
                 c.RoutePrefix = string.Empty;
             });
 
+            app.UseCors("AllowAll");
 
             app.UseSession();
             app.UseHttpsRedirection();

@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
@@ -226,5 +227,22 @@ namespace FitServer.Controllers
             return Ok(data);
         }
 
+        [HttpGet("all-data")]
+        public async Task<IActionResult> GetAllFitbitData()
+        {
+            var db = FirestoreDb.Create("fyp-assistant-7a216");
+            var snapshot = await db.Collection("fitbit_data").GetSnapshotAsync();
+
+            var allData = new List<Dictionary<string, object>>();
+
+            foreach (var doc in snapshot.Documents)
+            {
+                var data = doc.ToDictionary();
+                data["date"] = doc.Id; 
+                allData.Add(data);
+            }
+
+            return Ok(allData);
+        }
     }
 }
