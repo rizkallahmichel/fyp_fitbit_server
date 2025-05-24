@@ -1,13 +1,50 @@
-﻿using System.Net.Http.Headers;
+﻿using Microsoft.Extensions.Configuration;
+using System.Net.Http.Headers;
 using System.Text.Json;
 
 public class FitbitDataLoader : IHostedService
 {
     private readonly IServiceProvider _serviceProvider;
-
-    public FitbitDataLoader(IServiceProvider serviceProvider)
+    private readonly IConfiguration _configuration;
+    public FitbitDataLoader(IServiceProvider serviceProvider, IConfiguration configuration)
     {
         _serviceProvider = serviceProvider;
+        _configuration = configuration;
+    }
+
+    private async Task<String> getAccessToken()
+    {
+        var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
+        var code = _configuration.GetValue<string>("Fitbit:Code");
+        var codeVerifier = _configuration.GetValue<string>("Fitbit:CodeVerifier");
+        var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
+
+        var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
+
+        var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            { "client_id", clientId },
+            { "grant_type", "authorization_code" },
+            { "redirect_uri", redirectUri },
+            { "code", code },
+            { "code_verifier", codeVerifier }
+        });
+
+        var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync();
+            throw new Exception($"Unable to request new Fitbit token: {error}");
+        }
+        var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        return responseData.GetProperty("access_token").GetString();
+
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -15,7 +52,7 @@ public class FitbitDataLoader : IHostedService
         using var scope = _serviceProvider.CreateScope();
         var firebaseService = scope.ServiceProvider.GetRequiredService<FirebaseService>();
 
-        var accessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyc29jIHJlY2cgcnNldCByaXJuIHJveHkgcnBybyBybnV0IHJzbGUgcmNmIHJhY3QgcmxvYyBycmVzIHJ3ZWkgcmhyIHJ0ZW0iLCJleHAiOjE3NDgwNjQ0OTYsImlhdCI6MTc0ODAzNTY5Nn0.OuVWnjz9EkqrDQ1tCtn_yv9TT-CyKkwsiBze2sBn0dk"; 
+        var accessToken = await getAccessToken(); 
 
         var httpClient = new HttpClient();
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);

@@ -1,3 +1,4 @@
+using Google.Api;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -24,10 +25,15 @@ namespace FitServer
                 });
             });
             builder.Services.AddHttpContextAccessor();
-
-            builder.Services.AddSingleton<FirebaseService>();
             builder.Services.AddHostedService<FitbitDataLoader>();
-
+            builder.Services.AddSingleton<FirebaseService>();
+            builder.Services.AddDistributedMemoryCache();
+            builder.Services.AddSession(options =>
+            {
+                options.IdleTimeout = TimeSpan.FromMinutes(30);
+                options.Cookie.HttpOnly = true;
+                options.Cookie.IsEssential = true;
+            });
             // Add HttpClientFactory
             builder.Services.AddHttpClient();
 
@@ -49,7 +55,7 @@ namespace FitServer
             });
 
 
-
+            app.UseSession();
             app.UseHttpsRedirection();
 
             app.UseSession();

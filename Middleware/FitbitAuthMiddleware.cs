@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using Google.Api;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -9,6 +10,7 @@ public class FitbitAuthMiddleware
     private static string? _accessToken;
     private static string? _refreshToken;
     private readonly IConfiguration _configuration;
+
     public FitbitAuthMiddleware(RequestDelegate next, IConfiguration configuration)
     {
         _next = next;
@@ -21,15 +23,15 @@ public class FitbitAuthMiddleware
         {
             if (!string.IsNullOrEmpty(_refreshToken))
             {
-                var refreshed = await TryRefreshTokenAsync();
+                var refreshed = await TryRefreshTokenAsync(context);
                 if (!refreshed)
                 {
-                    await RequestNewTokenAsync(); // fallback to full flow
+                    await RequestNewTokenAsync(context);
                 }
             }
             else
             {
-                await RequestNewTokenAsync(); // initial token request
+                await RequestNewTokenAsync(context);
             }
         }
 
@@ -45,38 +47,47 @@ public class FitbitAuthMiddleware
         return response.IsSuccessStatusCode;
     }
 
-    private async Task<bool> TryRefreshTokenAsync()
+    private async Task<bool> TryRefreshTokenAsync(HttpContext context)
     {
         var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
-        var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
+        var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
+
+        var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             { "grant_type", "refresh_token" },
-            { "refresh_token", _refreshToken ?? string.Empty },
-            { "client_id", clientId }
+            { "refresh_token", _refreshToken ?? string.Empty }
         });
 
-        using var client = new HttpClient();
         var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
 
         if (!response.IsSuccessStatusCode)
-        {
             return false;
-        }
 
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        context.Items["AccessToken"] = _accessToken;
+        context.Items["RefreshToken"] = _refreshToken;
         return true;
     }
 
-    private async Task RequestNewTokenAsync()
+    private async Task RequestNewTokenAsync(HttpContext context)
     {
         var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
         var code = _configuration.GetValue<string>("Fitbit:Code");
         var codeVerifier = _configuration.GetValue<string>("Fitbit:CodeVerifier");
         var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
+
+        var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -87,7 +98,6 @@ public class FitbitAuthMiddleware
             { "code_verifier", codeVerifier }
         });
 
-        using var client = new HttpClient();
         var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
 
         if (!response.IsSuccessStatusCode)
@@ -99,5 +109,7 @@ public class FitbitAuthMiddleware
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        context.Items["AccessToken"] = _accessToken;
+        context.Items["RefreshToken"] = _refreshToken;
     }
 }
