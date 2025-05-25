@@ -244,5 +244,62 @@ namespace FitServer.Controllers
 
             return Ok(allData);
         }
+
+        [HttpGet("stress-level")]
+        public async Task<IActionResult> GetStressLevel()
+        {
+            var db = FirestoreDb.Create("fyp-assistant-7a216");
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            var doc = await db.Collection("fitbit_data").Document(today).GetSnapshotAsync();
+
+            if (!doc.Exists) return NotFound("No data available for today.");
+
+            var data = doc.ToDictionary();
+
+            double hrv = Convert.ToDouble(data.GetValueOrDefault("hrv", 0));
+            double rhr = Convert.ToDouble(data.GetValueOrDefault("rhr", 0));
+            double breathingRate = Convert.ToDouble(data.GetValueOrDefault("breathingRate", 0));
+            double sleepScore = Convert.ToDouble(data.GetValueOrDefault("sleepScore", 0));
+
+            string stressLevel;
+
+            if (hrv < 20 && rhr > 75 && breathingRate > 16 && sleepScore < 70)
+                stressLevel = "High Stress";
+            else if (hrv < 30 || rhr > 70 || breathingRate > 15)
+                stressLevel = "Moderate Stress";
+            else
+                stressLevel = "Low Stress";
+
+            return Ok(new { date = today, stressLevel });
+        }
+
+        [HttpGet("depression-level")]
+        public async Task<IActionResult> GetDepressionLevel()
+        {
+            var db = FirestoreDb.Create("fyp-assistant-7a216");
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            var doc = await db.Collection("fitbit_data").Document(today).GetSnapshotAsync();
+
+            if (!doc.Exists) return NotFound("No data available for today.");
+
+            var data = doc.ToDictionary();
+
+            double steps = Convert.ToDouble(data.GetValueOrDefault("steps", 0));
+            double sleepScore = Convert.ToDouble(data.GetValueOrDefault("sleepScore", 0));
+            double hrv = Convert.ToDouble(data.GetValueOrDefault("hrv", 0));
+            double temp = Convert.ToDouble(data.GetValueOrDefault("skinTemperature", 0));
+
+            string depressionLevel;
+
+            if (steps < 2000 && sleepScore < 70 && hrv < 25 && temp > 33)
+                depressionLevel = "High Risk";
+            else if (steps < 4000 || sleepScore < 75 || hrv < 30)
+                depressionLevel = "Moderate Risk";
+            else
+                depressionLevel = "Low Risk";
+
+            return Ok(new { date = today, depressionLevel });
+        }
+
     }
 }

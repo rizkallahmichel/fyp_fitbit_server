@@ -1,0 +1,6 @@
+{
+  "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJveHkgcnJlcyByaHIgcnBybyBydGVtIHJzbGUiLCJleHAiOjE3NDgyMjA4ODgsImlhdCI6MTc0ODE5MjA4OH0.6K3B7mceURhLHlej2r5hKizlOkBBBPiykV7xNlIvgGs",
+  "refresh_token": "d4273de0fc8918a3cb4a7e6258a8b3f7fc5ac6aa97843a792c6207ac550dd605",
+  "expires_in": 28800,
+  "obtained_at": "2025-05-25T16:54:50.0443691Z"
+}
