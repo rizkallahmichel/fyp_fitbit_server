@@ -1,4 +1,6 @@
 ﻿using Google.Cloud.Firestore;
+using Grpc.Core;
+using GrpcStatusCode = Grpc.Core.StatusCode;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -50,19 +52,32 @@ namespace FitServer.Controllers
         [HttpGet("all-data")]
         public async Task<IActionResult> GetAllFitbitData()
         {
-            var db = FirestoreDb.Create("fyp-assistant-7a216");
-            var snapshot = await db.Collection("fitbit_data").GetSnapshotAsync();
-
-            var allData = new List<Dictionary<string, object>>();
-
-            foreach (var doc in snapshot.Documents)
+            try
             {
-                var data = doc.ToDictionary();
-                data["date"] = doc.Id; 
-                allData.Add(data);
-            }
+                var db = FirestoreDb.Create("fyp-assistant-7a216");
+                var snapshot = await db.Collection("fitbit_data").GetSnapshotAsync();
 
-            return Ok(allData);
+                var allData = new List<Dictionary<string, object>>();
+
+                foreach (var doc in snapshot.Documents)
+                {
+                    var data = doc.ToDictionary();
+                    data["date"] = doc.Id;
+                    allData.Add(data);
+                }
+
+                return Ok(allData);
+            }
+            catch (RpcException ex) when (ex.StatusCode == GrpcStatusCode.PermissionDenied)
+            {
+                return base.StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    "Firestore permission denied. Grant the configured service account access to the fitbit_data collection.");
+            }
+            catch (Exception ex)
+            {
+                return base.StatusCode(StatusCodes.Status500InternalServerError,
+                    $"Failed to load Fitbit data: {ex.Message}");
+            }
         }
 
     }

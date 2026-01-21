@@ -56,10 +56,13 @@ public sealed class EcgAuthService : IEcgAuthService
     public async Task<EcgSessionRecord> CollectSessionAsync(string accessToken, CancellationToken ct = default)
     {
         var capture = await CaptureSessionAsync(accessToken, ct);
+        var collectedAtUtc = DateTime.UtcNow;
+
         var docRef = await _db.Collection("ecg_sessions").AddAsync(new Dictionary<string, object>
         {
             ["fitbitUserId"] = capture.UserId,
-            ["sessionTimeUtc"] = Timestamp.FromDateTime(DateTime.UtcNow),
+            ["sessionTimeUtc"] = Timestamp.FromDateTime(collectedAtUtc),
+            ["collectedAtUtc"] = Timestamp.FromDateTime(collectedAtUtc),
             ["hrvDailyRmssd"] = capture.Hrv ?? 0d,
             ["ecgStartTime"] = capture.Reading.StartTime?.UtcDateTime,
             ["ecgFeatures"] = FeaturesToDictionary(capture.Features)

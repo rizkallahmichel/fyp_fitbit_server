@@ -26,7 +26,6 @@ namespace FitServer
                 });
             });
             builder.Services.AddHttpContextAccessor();
-            builder.Services.AddHostedService<FitbitDataLoader>();
             builder.Services.AddSingleton<FirebaseService>();
             builder.Services.AddDistributedMemoryCache();
             builder.Services.AddSession(options =>
@@ -37,6 +36,11 @@ namespace FitServer
             });
             // Add HttpClientFactory
             builder.Services.AddHttpClient();
+
+            if (builder.Configuration.GetValue("Fitbit:EnableDataLoader", false))
+            {
+                builder.Services.AddHostedService<FitbitDataLoader>();
+            }
 
             builder.Services.AddSingleton<IFitbitEcgService, FitbitEcgService>();
             builder.Services.AddSingleton<IEcgFeatureExtractor, EcgFeatureExtractor>();

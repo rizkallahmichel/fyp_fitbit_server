@@ -43,7 +43,7 @@ public sealed class EcgReading
     [JsonPropertyName("leadNumber")]
     public int? LeadNumber { get; set; }
 
-    [JsonPropertyName("waveFormSamples")]
+    [JsonPropertyName("waveformSamples")]
     public List<int>? WaveFormSamples { get; set; }
 }
 

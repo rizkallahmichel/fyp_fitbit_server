@@ -1,6 +1,6 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJveHkgcnJlcyByaHIgcnBybyByc2xlIHJ0ZW0iLCJleHAiOjE3NDkzNDgyMjgsImlhdCI6MTc0OTMxOTQyOH0.tIZt4f3xJSctIulTq21cAfRKCQP04uTQlYvtjnNcF7o",
-  "refresh_token": "9888f5725270ce9f6150e6e9d3eb04ea29e465b3af5e78016ad12b63c340d96c",
+  "access_token": "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyZWNnIHJociBycHJvIiwiZXhwIjoxNzY5MDIwNTE5LCJpYXQiOjE3Njg5OTE3MTl9.nn27NMlf2XPyNQ0qq0bxvffFHrmma5Y6sotJADpUUPg",
+  "refresh_token": "e4cabc311bfe0c65c2b6a941ec3b47f1d3a790e7301e2ce854fa9084a904c2d2",
   "expires_in": 28800,
-  "obtained_at": "2025-06-07T18:03:48.5688559Z"
+  "obtained_at": "2026-01-21T10:35:19.2219161Z"
 }

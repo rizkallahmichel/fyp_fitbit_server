@@ -21,8 +21,15 @@ public sealed class EcgAuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(accessToken))
             return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
 
-        var record = await _authService.CollectSessionAsync(accessToken, ct);
-        return Ok(record);
+        try
+        {
+            var record = await _authService.CollectSessionAsync(accessToken, ct);
+            return Ok(record);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 
     [HttpPost("train")]
@@ -39,7 +46,14 @@ public sealed class EcgAuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(accessToken))
             return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
 
-        var result = await _authService.VerifyAsync(accessToken, threshold, ct);
-        return Ok(result);
+        try
+        {
+            var result = await _authService.VerifyAsync(accessToken, threshold, ct);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 }
