@@ -1,3 +1,4 @@
+using FitServer.Services;
 using Google.Api;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,6 +37,11 @@ namespace FitServer
             });
             // Add HttpClientFactory
             builder.Services.AddHttpClient();
+
+            builder.Services.AddSingleton<IFitbitEcgService, FitbitEcgService>();
+            builder.Services.AddSingleton<IEcgFeatureExtractor, EcgFeatureExtractor>();
+            builder.Services.AddSingleton<IEcgMlTrainer, EcgMlTrainer>();
+            builder.Services.AddSingleton<IEcgAuthService, EcgAuthService>();
 
             // Add Session support
             builder.Services.AddDistributedMemoryCache();
