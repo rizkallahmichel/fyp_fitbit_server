@@ -44,12 +44,13 @@ public sealed class EcgAuthService : IEcgAuthService
         IFitbitEcgService fitbit,
         IEcgFeatureExtractor extractor,
         IEcgMlTrainer trainer,
-        IWebHostEnvironment environment)
+        IWebHostEnvironment environment,
+        FirestoreDb db)
     {
         _fitbit = fitbit;
         _extractor = extractor;
         _trainer = trainer;
-        _db = FirestoreDb.Create("fyp-assistant-7a216");
+        _db = db;
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
     }
 

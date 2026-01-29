@@ -60,9 +60,9 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
 {
     private readonly FirestoreDb _db;
 
-    public EcgMlTrainer()
+    public EcgMlTrainer(FirestoreDb db)
     {
-        _db = FirestoreDb.Create("fyp-assistant-7a216");
+        _db = db;
     }
 
     public async Task<ModelTrainingResult> TrainAndSaveAsync(string modelPath, int maxPairsPerUser, CancellationToken ct = default)

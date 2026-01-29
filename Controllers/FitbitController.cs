@@ -11,6 +11,13 @@ namespace FitServer.Controllers
     [Route("api/fitbit")]
     public class FitbitController : ControllerBase
     {
+        private readonly FirestoreDb _db;
+
+        public FitbitController(FirestoreDb db)
+        {
+            _db = db;
+        }
+
         private async Task<IActionResult> FetchFitbitData(string endpoint)
         {
             var accessToken = HttpContext.Items["AccessToken"] as string;
@@ -54,8 +61,7 @@ namespace FitServer.Controllers
         {
             try
             {
-                var db = FirestoreDb.Create("fyp-assistant-7a216");
-                var snapshot = await db.Collection("fitbit_data").GetSnapshotAsync();
+                var snapshot = await _db.Collection("fitbit_data").GetSnapshotAsync();
 
                 var allData = new List<Dictionary<string, object>>();
 
