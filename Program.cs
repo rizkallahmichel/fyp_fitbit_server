@@ -1,6 +1,10 @@
 using FitServer.Services;
-using Google.Api;
+using Google.Apis.Auth.OAuth2;
+using Google.Cloud.Firestore;
+using Google.Cloud.Firestore.V1;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.OpenApi.Models;
@@ -39,12 +43,35 @@ namespace FitServer
 
             if (builder.Configuration.GetValue("Fitbit:EnableDataLoader", false))
             {
-                builder.Services.AddHostedService<FitbitDataLoader>();
-            }
+            builder.Services.AddHostedService<FitbitDataLoader>();
+        }
 
-            builder.Services.AddSingleton<IFitbitEcgService, FitbitEcgService>();
-            builder.Services.AddSingleton<IEcgFeatureExtractor, EcgFeatureExtractor>();
-            builder.Services.AddSingleton<IEcgMlTrainer, EcgMlTrainer>();
+        builder.Services.AddSingleton(provider =>
+        {
+            var configuration = provider.GetRequiredService<IConfiguration>();
+            var environment = provider.GetRequiredService<IWebHostEnvironment>();
+            return GoogleCredentialResolver.Resolve(configuration, environment);
+        });
+
+        builder.Services.AddSingleton(provider =>
+        {
+            var configuration = provider.GetRequiredService<IConfiguration>();
+            var credential = provider.GetRequiredService<GoogleCredential>();
+            var projectId = configuration["Google:ProjectId"] ?? "fyp-assistant-7a216";
+            var scopedCredential = credential.IsCreateScopedRequired
+                ? credential.CreateScoped(FirestoreClient.DefaultScopes)
+                : credential;
+
+            return new FirestoreDbBuilder
+            {
+                ProjectId = projectId,
+                Credential = scopedCredential
+            }.Build();
+        });
+
+        builder.Services.AddSingleton<IFitbitEcgService, FitbitEcgService>();
+        builder.Services.AddSingleton<IEcgFeatureExtractor, EcgFeatureExtractor>();
+        builder.Services.AddSingleton<IEcgMlTrainer, EcgMlTrainer>();
             builder.Services.AddSingleton<IEcgAuthService, EcgAuthService>();
 
             // Add Session support
