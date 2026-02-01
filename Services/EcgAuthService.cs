@@ -25,6 +25,7 @@ public interface IEcgAuthService
     Task<EcgSessionRecord> CollectSessionAsync(string accessToken, CancellationToken ct = default);
     Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default);
     Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default);
+    Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default);
 }
 
 public sealed class EcgAuthService : IEcgAuthService
@@ -74,6 +75,28 @@ public sealed class EcgAuthService : IEcgAuthService
 
     public Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default)
         => _trainer.TrainAndSaveAsync(_modelPath, maxPairsPerUser, ct);
+
+    public async Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default)
+    {
+        var snapshot = await _db.Collection("ecg_sessions").GetSnapshotAsync(ct);
+        var sessions = new List<EcgSessionRecord>(snapshot.Count);
+
+        foreach (var doc in snapshot.Documents)
+        {
+            var data = doc.ToDictionary();
+            var userId = data.TryGetValue("fitbitUserId", out var userObj) ? userObj?.ToString() ?? string.Empty : string.Empty;
+            var features = TryParseFeatures(data);
+
+            sessions.Add(new EcgSessionRecord(
+                doc.Id,
+                userId,
+                TryParseDateTimeOffset(data.TryGetValue("ecgStartTime", out var startTimeObj) ? startTimeObj : null),
+                TryGetDouble(data, "hrvDailyRmssd"),
+                features));
+        }
+
+        return sessions;
+    }
 
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
     {
@@ -211,4 +234,45 @@ public sealed class EcgAuthService : IEcgAuthService
         ["EstimatedBpm"] = features.EstimatedBpm,
         ["PeakCount"] = features.PeakCount
     };
+
+    private static EcgFeatures TryParseFeatures(Dictionary<string, object> payload)
+    {
+        if (payload.TryGetValue("ecgFeatures", out var featuresObj) && featuresObj is Dictionary<string, object> dict)
+        {
+            double Get(string key) => dict.TryGetValue(key, out var value) ? Convert.ToDouble(value) : 0d;
+
+            return new EcgFeatures(
+                Get("Mean"),
+                Get("Std"),
+                Get("Rms"),
+                Get("Min"),
+                Get("Max"),
+                Get("Skewness"),
+                Get("Kurtosis"),
+                Get("EstimatedBpm"),
+                Get("PeakCount"));
+        }
+
+        return new EcgFeatures(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    private static DateTimeOffset? TryParseDateTimeOffset(object? value)
+    {
+        return value switch
+        {
+            null => null,
+            Timestamp ts => ts.ToDateTime(),
+            DateTimeOffset dto => dto,
+            DateTime dt => DateTime.SpecifyKind(dt, DateTimeKind.Utc),
+            _ => null
+        };
+    }
+
+    private static double? TryGetDouble(Dictionary<string, object> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value) || value is null)
+            return null;
+
+        return Convert.ToDouble(value);
+    }
 }
