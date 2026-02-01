@@ -56,4 +56,11 @@ public sealed class EcgAuthController : ControllerBase
             return BadRequest(ex.Message);
         }
     }
+
+    [HttpGet("sessions")]
+    public async Task<IActionResult> GetSessions(CancellationToken ct)
+    {
+        var sessions = await _authService.GetSessionsAsync(ct);
+        return Ok(sessions);
+    }
 }
