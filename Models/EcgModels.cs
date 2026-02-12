@@ -61,3 +61,72 @@ public sealed class FitbitUser
     [JsonPropertyName("displayName")]
     public string? DisplayName { get; set; }
 }
+
+public sealed class SessionCaptureRequest
+{
+    [JsonPropertyName("metadata")]
+    public SessionMetadata? Metadata { get; set; }
+
+    [JsonPropertyName("tags")]
+    public List<string>? Tags { get; set; }
+
+    [JsonPropertyName("notes")]
+    public string? Notes { get; set; }
+}
+
+public sealed class SessionMetadata
+{
+    [JsonPropertyName("activityLabel")]
+    public string? ActivityLabel { get; set; }
+
+    [JsonPropertyName("stressLevel")]
+    public string? StressLevel { get; set; }
+
+    [JsonPropertyName("sensorPlacement")]
+    public string? SensorPlacement { get; set; }
+
+    [JsonPropertyName("deviceModel")]
+    public string? DeviceModel { get; set; }
+}
+
+public sealed class ContinuousVerifyRequest
+{
+    [JsonPropertyName("threshold")]
+    public double? Threshold { get; set; }
+
+    [JsonPropertyName("windowMinutes")]
+    public int WindowMinutes { get; set; } = 15;
+
+    [JsonPropertyName("strideMinutes")]
+    public int StrideMinutes { get; set; } = 5;
+}
+
+public sealed class ContinuousVerifySample
+{
+    [JsonPropertyName("windowStartUtc")]
+    public DateTimeOffset WindowStartUtc { get; set; }
+
+    [JsonPropertyName("windowEndUtc")]
+    public DateTimeOffset WindowEndUtc { get; set; }
+
+    [JsonPropertyName("score")]
+    public double Score { get; set; }
+
+    [JsonPropertyName("passes")]
+    public bool Passes { get; set; }
+}
+
+public sealed class ContinuousVerifyResponse
+{
+    [JsonPropertyName("authenticated")]
+    public bool Authenticated { get; set; }
+
+    [JsonPropertyName("rollingMeanScore")]
+    public double RollingMeanScore { get; set; }
+
+    [JsonPropertyName("rollingWorstScore")]
+    public double RollingWorstScore { get; set; }
+
+    [JsonPropertyName("samples")]
+    public List<ContinuousVerifySample> Samples { get; set; } = new();
+}

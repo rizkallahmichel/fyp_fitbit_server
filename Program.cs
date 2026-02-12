@@ -72,6 +72,8 @@ namespace FitServer
         builder.Services.AddSingleton<IFitbitEcgService, FitbitEcgService>();
         builder.Services.AddSingleton<IEcgFeatureExtractor, EcgFeatureExtractor>();
         builder.Services.AddSingleton<IEcgMlTrainer, EcgMlTrainer>();
+        builder.Services.AddSingleton<IEcgAugmentationService, EcgAugmentationService>();
+        builder.Services.AddSingleton<IEcgEmbeddingService, EcgEmbeddingService>();
             builder.Services.AddSingleton<IEcgAuthService, EcgAuthService>();
 
             // Add Session support
