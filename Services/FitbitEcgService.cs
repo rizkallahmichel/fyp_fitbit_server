@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using FitServer.Models;
@@ -7,6 +8,7 @@ namespace FitServer.Services;
 public interface IFitbitEcgService
 {
     Task<EcgReading?> GetLatestEcgAsync(string accessToken, DateOnly? afterDate = null, CancellationToken ct = default);
+    Task<IReadOnlyList<EcgReading>> GetRecentEcgsAsync(string accessToken, int limit, DateOnly? afterDate = null, CancellationToken ct = default);
     Task<double?> GetDailyHrvAsync(string accessToken, DateOnly date, CancellationToken ct = default);
     Task<string> GetFitbitUserIdAsync(string accessToken, CancellationToken ct = default);
 }
@@ -22,8 +24,15 @@ public sealed class FitbitEcgService : IFitbitEcgService
 
     public async Task<EcgReading?> GetLatestEcgAsync(string accessToken, DateOnly? afterDate = null, CancellationToken ct = default)
     {
+        var readings = await GetRecentEcgsAsync(accessToken, 1, afterDate, ct);
+        return readings.FirstOrDefault();
+    }
+
+    public async Task<IReadOnlyList<EcgReading>> GetRecentEcgsAsync(string accessToken, int limit, DateOnly? afterDate = null, CancellationToken ct = default)
+    {
         var date = (afterDate ?? DateOnly.FromDateTime(DateTime.UtcNow.AddMonths(-1))).ToString("yyyy-MM-dd");
-        var url = $"https://api.fitbit.com/1/user/-/ecg/list.json?afterDate={date}&sort=desc&limit=1&offset=0";
+        var boundedLimit = Math.Clamp(limit, 1, 20);
+        var url = $"https://api.fitbit.com/1/user/-/ecg/list.json?afterDate={date}&sort=desc&limit={boundedLimit}&offset=0";
         var client = CreateClient(accessToken);
 
         using var response = await client.GetAsync(url, ct);
@@ -36,7 +45,7 @@ public sealed class FitbitEcgService : IFitbitEcgService
         var json = await response.Content.ReadAsStringAsync(ct);
         var parsed = JsonSerializer.Deserialize<EcgLogListResponse>(json);
         if (parsed?.EcgReadings != null && parsed.EcgReadings.Count > 0)
-            return parsed.EcgReadings[0];
+            return parsed.EcgReadings;
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -47,11 +56,24 @@ public sealed class FitbitEcgService : IFitbitEcgService
             {
                 var first = arr.EnumerateArray().FirstOrDefault();
                 if (first.ValueKind == JsonValueKind.Object)
-                    return JsonSerializer.Deserialize<EcgReading>(first.GetRawText());
+                {
+                    var readings = new List<EcgReading>();
+                    foreach (var element in arr.EnumerateArray())
+                    {
+                        if (element.ValueKind == JsonValueKind.Object)
+                        {
+                            var reading = JsonSerializer.Deserialize<EcgReading>(element.GetRawText());
+                            if (reading != null)
+                                readings.Add(reading);
+                        }
+                    }
+
+                    return readings;
+                }
             }
         }
 
-        return null;
+        return Array.Empty<EcgReading>();
     }
 
     public async Task<double?> GetDailyHrvAsync(string accessToken, DateOnly date, CancellationToken ct = default)

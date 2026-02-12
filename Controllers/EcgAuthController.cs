@@ -1,3 +1,4 @@
+using FitServer.Models;
 using FitServer.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -15,7 +16,7 @@ public sealed class EcgAuthController : ControllerBase
     }
 
     [HttpPost("collect-session")]
-    public async Task<IActionResult> CollectSession(CancellationToken ct)
+    public async Task<IActionResult> CollectSession([FromBody] SessionCaptureRequest? request, CancellationToken ct)
     {
         var accessToken = HttpContext.Items["AccessToken"] as string;
         if (string.IsNullOrWhiteSpace(accessToken))
@@ -23,7 +24,7 @@ public sealed class EcgAuthController : ControllerBase
 
         try
         {
-            var record = await _authService.CollectSessionAsync(accessToken, ct);
+            var record = await _authService.CollectSessionAsync(accessToken, request, ct);
             return Ok(record);
         }
         catch (InvalidOperationException ex)
@@ -55,6 +56,18 @@ public sealed class EcgAuthController : ControllerBase
         {
             return BadRequest(ex.Message);
         }
+    }
+
+    [HttpPost("continuous-verify")]
+    public async Task<IActionResult> ContinuousVerify([FromBody] ContinuousVerifyRequest? request, CancellationToken ct = default)
+    {
+        var accessToken = HttpContext.Items["AccessToken"] as string;
+        if (string.IsNullOrWhiteSpace(accessToken))
+            return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
+
+        var payload = request ?? new ContinuousVerifyRequest();
+        var response = await _authService.VerifyContinuouslyAsync(accessToken, payload, ct);
+        return Ok(response);
     }
 
     [HttpGet("sessions")]
