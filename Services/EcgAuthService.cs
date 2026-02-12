@@ -171,14 +171,23 @@ public sealed class EcgAuthService : IEcgAuthService
 
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
     {
-        var capture = await CaptureSessionAsync(accessToken, ct);
+        var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
+        var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
+        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct);
+        if (baselineSessions.Count == 0)
+            throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
+
+        var attempt = await CaptureSessionAsync(accessToken, ct);
+        var attemptFeatures = attempt.Features;
+
         var summary = await ScoreAttemptAsync(
-            capture.UserId,
-            capture.Features,
-            capture.Reading.StartTime,
-            capture.Hrv,
+            userId,
+            attemptFeatures,
+            attempt.Reading.StartTime,
+            attempt.Hrv,
             threshold,
-            ct);
+            ct,
+            baselineSessions);
 
         await LogVerificationAttemptAsync(summary, ct);
         return summary.Result;
@@ -479,6 +488,36 @@ public sealed class EcgAuthService : IEcgAuthService
             dEmbeddingL2 = ComputeEmbeddingDistance(baseline.Embedding, attemptEmbedding),
             dEmbeddingCosine = ComputeEmbeddingCosine(baseline.Embedding, attemptEmbedding)
         };
+    }
+
+    private static EcgFeatures BuildFeaturesFromSession(EcgSession session)
+    {
+        var features = new EcgFeatures(
+            session.Mean,
+            session.Std,
+            session.Rms,
+            session.Min,
+            session.Max,
+            session.Skewness,
+            session.Kurtosis,
+            session.EstimatedBpm,
+            session.PeakCount,
+            session.RrMeanMs,
+            session.RrStdMs,
+            session.QrsWidthMs,
+            session.LowFreqPowerRatio,
+            session.MidFreqPowerRatio,
+            session.HighFreqPowerRatio,
+            session.SpectralCentroidHz,
+            session.SpectralEntropy,
+            session.VeryLowFreqPowerRatio,
+            session.SignalQualityScore,
+            session.MotionArtifactIndex,
+            session.BaselineDriftRatio);
+
+        return session.Embedding is { Length: > 0 }
+            ? features with { EmbeddingVector = session.Embedding }
+            : features;
     }
 
     private static Dictionary<string, object> FeaturesToDictionary(EcgFeatures features) => new()
