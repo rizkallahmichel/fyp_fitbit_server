@@ -1,5 +1,6 @@
 using FitServer.Models;
 using Google.Cloud.Firestore;
+using Microsoft.Extensions.Options;
 using Microsoft.ML;
 using System.Linq;
 
@@ -28,7 +29,10 @@ public sealed record VerifyResult(
     double Threshold,
     DateTimeOffset? EcgStartTime,
     double? HrvDailyRmssd,
-    IReadOnlyList<double> ComparisonScores);
+    IReadOnlyList<double> ComparisonScores,
+    double ConsensusScore,
+    int PassingVotes,
+    ConfidenceSnapshot? Confidence);
 
 public interface IEcgAuthService
 {
@@ -48,6 +52,9 @@ public sealed class EcgAuthService : IEcgAuthService
     private readonly IEcgFeatureExtractor _extractor;
     private readonly IEcgMlTrainer _trainer;
     private readonly IEcgEmbeddingService _embedding;
+    private readonly IConfidenceModelingService _confidence;
+    private readonly IEcgModelStateRepository _modelState;
+    private readonly IOptionsMonitor<AdaptiveModelOptions> _adaptiveOptions;
     private readonly FirestoreDb _db;
     private readonly MLContext _mlContext = new();
     private readonly string _modelPath;
@@ -64,6 +71,9 @@ public sealed class EcgAuthService : IEcgAuthService
         IEcgFeatureExtractor extractor,
         IEcgMlTrainer trainer,
         IEcgEmbeddingService embedding,
+        IConfidenceModelingService confidence,
+        IEcgModelStateRepository modelState,
+        IOptionsMonitor<AdaptiveModelOptions> adaptiveOptions,
         IWebHostEnvironment environment,
         FirestoreDb db)
     {
@@ -71,6 +81,9 @@ public sealed class EcgAuthService : IEcgAuthService
         _extractor = extractor;
         _trainer = trainer;
         _embedding = embedding;
+        _confidence = confidence;
+        _modelState = modelState;
+        _adaptiveOptions = adaptiveOptions;
         _db = db;
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
@@ -108,6 +121,7 @@ public sealed class EcgAuthService : IEcgAuthService
         };
 
         var docRef = await _db.Collection("ecg_sessions").AddAsync(payload, ct);
+        await _modelState.IncrementSessionCountAsync(1, ct);
 
         return new EcgSessionRecord(
             docRef.Id,
@@ -126,8 +140,13 @@ public sealed class EcgAuthService : IEcgAuthService
             request?.Notes);
     }
 
-    public Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default)
-        => _trainer.TrainAndSaveAsync(_modelPath, maxPairsPerUser, ct);
+    public async Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default)
+    {
+        var result = await _trainer.TrainAndSaveAsync(_modelPath, maxPairsPerUser, ct);
+        var sessionCount = await _modelState.GetSessionCountAsync(ct);
+        await _modelState.MarkModelTrainedAsync(result, sessionCount, ct);
+        return result;
+    }
 
     public async Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default)
     {
@@ -329,6 +348,16 @@ public sealed class EcgAuthService : IEcgAuthService
                             bestScore >= appliedThreshold &&
                             consensusScore >= appliedThreshold;
 
+        ConfidenceSnapshot? confidence = null;
+        try
+        {
+            confidence = await _confidence.AppendAsync(userId, bestScore, appliedThreshold, authenticated, ct);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Confidence modeling failed: {ex.Message}");
+        }
+
         var result = new VerifyResult(
             userId,
             authenticated,
@@ -336,9 +365,12 @@ public sealed class EcgAuthService : IEcgAuthService
             appliedThreshold,
             startTime,
             hrv,
-            scores);
+            scores,
+            consensusScore,
+            passingVotes,
+            confidence);
 
-        return new VerificationSummary(result, consensusScore, passingVotes, appliedThreshold, latestScore, latestPasses);
+        return new VerificationSummary(result, consensusScore, passingVotes, appliedThreshold, latestScore, latestPasses, confidence);
     }
 
     private Task LogVerificationAttemptAsync(VerificationSummary summary, CancellationToken ct)
@@ -351,10 +383,14 @@ public sealed class EcgAuthService : IEcgAuthService
             ["threshold"] = summary.AppliedThreshold,
             ["meanScore"] = summary.MeanScore,
             ["votesPassing"] = summary.VotesPassing,
+            ["consensusScore"] = summary.Result.ConsensusScore,
             ["latestScore"] = summary.LatestScore ?? 0d,
             ["latestPasses"] = summary.LatestPasses,
             ["authenticated"] = summary.Result.Authenticated,
-            ["comparisonCount"] = summary.Result.ComparisonScores.Count
+            ["comparisonCount"] = summary.Result.ComparisonScores.Count,
+            ["confidenceLevel"] = summary.Result.Confidence?.ConfidenceLevel ?? 0d,
+            ["confidenceDrift"] = summary.Result.Confidence?.Drift ?? 0d,
+            ["confidenceSamples"] = summary.Result.Confidence?.SampleCount ?? 0
         }, ct);
     }
 
@@ -422,7 +458,8 @@ public sealed class EcgAuthService : IEcgAuthService
         int VotesPassing,
         double AppliedThreshold,
         double? LatestScore,
-        bool LatestPasses);
+        bool LatestPasses,
+        ConfidenceSnapshot? Confidence);
 
     private PredictionEngine<PairRow, PairPrediction> CreatePredictionEngine()
     {

@@ -46,6 +46,7 @@ namespace FitServer
             builder.Services.AddHostedService<FitbitDataLoader>();
         }
 
+        builder.Services.Configure<AdaptiveModelOptions>(builder.Configuration.GetSection("AdaptiveModel"));
         builder.Services.AddSingleton(provider =>
         {
             var configuration = provider.GetRequiredService<IConfiguration>();
@@ -74,10 +75,13 @@ namespace FitServer
         builder.Services.AddSingleton<IEcgMlTrainer, EcgMlTrainer>();
         builder.Services.AddSingleton<IEcgAugmentationService, EcgAugmentationService>();
         builder.Services.AddSingleton<IEcgEmbeddingService, EcgEmbeddingService>();
-            builder.Services.AddSingleton<IEcgAuthService, EcgAuthService>();
+        builder.Services.AddSingleton<IEcgModelStateRepository, EcgModelStateRepository>();
+        builder.Services.AddSingleton<IConfidenceModelingService, ConfidenceModelingService>();
+        builder.Services.AddSingleton<IEcgAuthService, EcgAuthService>();
+        builder.Services.AddHostedService<AdaptiveModelSupervisor>();
 
-            // Add Session support
-            builder.Services.AddDistributedMemoryCache();
+        // Add Session support
+        builder.Services.AddDistributedMemoryCache();
             builder.Services.AddSession(options =>
             {
                 options.Cookie.HttpOnly = true;
