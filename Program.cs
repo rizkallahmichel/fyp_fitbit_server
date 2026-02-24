@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Primitives;
 using Microsoft.OpenApi.Models;
 
 namespace FitServer
@@ -116,7 +117,25 @@ namespace FitServer
 
             app.UseAuthorization();
 
-            app.UseMiddleware<FitbitAuthMiddleware>();
+            var disableFitbitMiddleware = builder.Configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
+            if (disableFitbitMiddleware)
+            {
+                app.Use(async (context, next) =>
+                {
+                    if (!context.Items.ContainsKey("AccessToken") &&
+                        context.Request.Headers.TryGetValue("X-Test-AccessToken", out var headerValue) &&
+                        !StringValues.IsNullOrEmpty(headerValue))
+                    {
+                        context.Items["AccessToken"] = headerValue.ToString();
+                    }
+
+                    await next();
+                });
+            }
+            else
+            {
+                app.UseMiddleware<FitbitAuthMiddleware>();
+            }
 
             app.MapControllers();
 
