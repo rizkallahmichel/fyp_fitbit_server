@@ -10,6 +10,7 @@
 # Build results
 bin/
 obj/
+TestResults/
 
 # Others
 *.log
