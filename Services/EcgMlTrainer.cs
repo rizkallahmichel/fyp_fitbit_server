@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Google.Cloud.Firestore;
 using Microsoft.ML;
@@ -207,6 +208,17 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
 
         var model = pipeline.Fit(split.TrainSet);
         var predictions = model.Transform(split.TestSet);
+
+        var scoredRows = ml.Data
+            .CreateEnumerable<PairCorrectionRow>(predictions, reuseRowObject: false)
+            .Select(row => $"{(row.Label ? 1 : 0)},{row.Score},{row.Probability}");
+
+        var reportDir = Path.Combine(AppContext.BaseDirectory, "reports");
+        Directory.CreateDirectory(reportDir);
+        var csvPath = Path.Combine(reportDir, "train_scores.csv");
+        File.WriteAllLines(csvPath, new[] { "Label,Score,Probability" }.Concat(scoredRows));
+        Console.WriteLine($"Saved training scores to {csvPath}");
+
         var metrics = ml.BinaryClassification.Evaluate(predictions);
 
         Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
