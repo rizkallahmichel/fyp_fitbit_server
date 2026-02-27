@@ -59,4 +59,6 @@ Test highlights:
 - `Services/*.cs`: Implementation details with inline comments for ML pipeline components.
 - `README.md` (this file): Quick start, run instructions, and test coverage.
 
-Keep documentation synchronized with code changes—especially when adding new endpoints or modifying Firestore schema. Update this README with any additional prerequisites or operational steps.
+
+python script to show result and score:
+python tools/plot_train_metrics.py --scores bin\Debug\net9.0\reports\train_scores.csv --model-zip ecg_auth_model.zip --output-dir docs\metrics
