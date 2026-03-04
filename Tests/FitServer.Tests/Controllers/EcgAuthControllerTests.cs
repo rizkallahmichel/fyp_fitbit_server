@@ -81,4 +81,20 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
         Assert.Equal(10, _service.LastContinuousRequest.StrideMinutes);
         Assert.Equal(0.8, _service.LastContinuousRequest.Threshold);
     }
+
+    [Fact]
+    public async Task BenchmarkEcgId_ReturnsResultAndStoresRequest()
+    {
+        _service.Reset();
+        var response = await _client.PostAsJsonAsync("/api/ecg-auth/benchmark-ecg-id", new EcgBenchmarkRequest
+        {
+            MaxPairsPerUser = 600,
+            TestFraction = 0.4
+        });
+
+        response.EnsureSuccessStatusCode();
+        Assert.NotNull(_service.LastBenchmarkRequest);
+        Assert.Equal(600, _service.LastBenchmarkRequest!.MaxPairsPerUser);
+        Assert.Equal(0.4, _service.LastBenchmarkRequest.TestFraction);
+    }
 }

@@ -122,6 +122,7 @@ public sealed record ModelTrainingResult(
 public interface IEcgMlTrainer
 {
     Task<ModelTrainingResult> TrainAndSaveAsync(string modelPath, int maxPairsPerUser, CancellationToken ct = default);
+    Task<ModelTrainingResult> TrainWithScopeAsync(string modelPath, int maxPairsPerUser, EcgDatasetScope scope, double testFraction, CancellationToken ct = default);
 }
 
 public sealed class EcgMlTrainer : IEcgMlTrainer
@@ -143,9 +144,14 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         _embedding = embedding;
     }
 
-    public async Task<ModelTrainingResult> TrainAndSaveAsync(string modelPath, int maxPairsPerUser, CancellationToken ct = default)
+    public Task<ModelTrainingResult> TrainAndSaveAsync(string modelPath, int maxPairsPerUser, CancellationToken ct = default)
     {
-        var sessions = await LoadSessionsAsync(ct);
+        return TrainWithScopeAsync(modelPath, maxPairsPerUser, EcgDatasetScope.All, 0.2, ct);
+    }
+
+    public async Task<ModelTrainingResult> TrainWithScopeAsync(string modelPath, int maxPairsPerUser, EcgDatasetScope scope, double testFraction, CancellationToken ct = default)
+    {
+        var sessions = await LoadSessionsAsync(scope, ct);
         if (sessions.Count < 10)
             throw new InvalidOperationException("Collect at least 10 ECG sessions before training.");
 
@@ -155,7 +161,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
 
         var ml = new MLContext(seed: 42);
         var data = ml.Data.LoadFromEnumerable(pairs);
-        var split = ml.Data.TrainTestSplit(data, testFraction: 0.2);
+        var clampedFraction = Math.Clamp(testFraction, 0.05, 0.9);
+        var split = ml.Data.TrainTestSplit(data, testFraction: clampedFraction);
 
         var featureColumns = new[]
         {
@@ -306,7 +313,7 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         }
     }
 
-    private async Task<List<EcgSession>> LoadSessionsAsync(CancellationToken ct)
+    private async Task<List<EcgSession>> LoadSessionsAsync(EcgDatasetScope scope, CancellationToken ct)
     {
         var snapshot = await _db.Collection("ecg_sessions").GetSnapshotAsync(ct);
         var sessions = new List<EcgSession>();
@@ -315,6 +322,10 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         {
             var payload = doc.ToDictionary();
             if (!payload.TryGetValue("fitbitUserId", out var userObj) || userObj is null)
+                continue;
+
+            var dataSource = EcgDataSource.Resolve(payload);
+            if (!EcgDataSource.MatchesScope(scope, dataSource))
                 continue;
 
             if (!payload.TryGetValue("ecgFeatures", out var featuresObj) || featuresObj is not Dictionary<string, object> featureDict)

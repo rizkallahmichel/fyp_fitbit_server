@@ -48,6 +48,7 @@ internal static class TestDataFactory
         return new EcgSessionRecord(
             id,
             userId,
+            EcgDataSource.Fitbit,
             DateTimeOffset.UtcNow,
             72,
             features,

@@ -1,7 +1,12 @@
 using FitServer.Models;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using Microsoft.ML;
+using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace FitServer.Services;
@@ -9,6 +14,7 @@ namespace FitServer.Services;
 public sealed record EcgSessionRecord(
     string DocumentId,
     string FitbitUserId,
+    string DataSource,
     DateTimeOffset? EcgStartTime,
     double? HrvDailyRmssd,
     EcgFeatures Features,
@@ -41,6 +47,7 @@ public interface IEcgAuthService
     Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default);
     Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default);
     Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default);
+    Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default);
 }
 
 public sealed class EcgAuthService : IEcgAuthService
@@ -48,6 +55,8 @@ public sealed class EcgAuthService : IEcgAuthService
     private const double DefaultThreshold = 0.85;
     private const int VerificationBaselineCount = 0;
     private const int ScoreConsensusTopK = 3;
+    private const string AutoVerifyTag = "auto-verify";
+    private const string AutoVerifyNote = "Captured automatically after successful /verify.";
     private readonly IFitbitEcgService _fitbit;
     private readonly IEcgFeatureExtractor _extractor;
     private readonly IEcgMlTrainer _trainer;
@@ -65,6 +74,8 @@ public sealed class EcgAuthService : IEcgAuthService
     private ITransformer? _correctionModel;
     private DataViewSchema? _correctionSchema;
     private readonly object _correctionLock = new();
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly bool _bypassFitbit;
 
     public EcgAuthService(
         IFitbitEcgService fitbit,
@@ -75,7 +86,9 @@ public sealed class EcgAuthService : IEcgAuthService
         IEcgModelStateRepository modelState,
         IOptionsMonitor<AdaptiveModelOptions> adaptiveOptions,
         IWebHostEnvironment environment,
-        FirestoreDb db)
+        FirestoreDb db,
+        IHttpContextAccessor httpContextAccessor,
+        IConfiguration configuration)
     {
         _fitbit = fitbit;
         _extractor = extractor;
@@ -85,6 +98,9 @@ public sealed class EcgAuthService : IEcgAuthService
         _modelState = modelState;
         _adaptiveOptions = adaptiveOptions;
         _db = db;
+        _httpContextAccessor = httpContextAccessor;
+        _bypassFitbit = configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
+        Console.WriteLine($"[EcgAuthService] Fitbit bypass mode: {_bypassFitbit}");
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
     }
@@ -92,52 +108,18 @@ public sealed class EcgAuthService : IEcgAuthService
     public async Task<EcgSessionRecord> CollectSessionAsync(string accessToken, SessionCaptureRequest? request, CancellationToken ct = default)
     {
         var capture = await CaptureSessionAsync(accessToken, ct);
-        var collectedAtUtc = DateTime.UtcNow;
-        var metadataDict = ToMetadataDictionary(request?.Metadata);
         var tags = request?.Tags?.Where(t => !string.IsNullOrWhiteSpace(t))
             .Select(t => t.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList() ?? new List<string>();
 
-        var payload = new Dictionary<string, object>
-        {
-            ["fitbitUserId"] = capture.UserId,
-            ["sessionTimeUtc"] = Timestamp.FromDateTime(collectedAtUtc),
-            ["collectedAtUtc"] = Timestamp.FromDateTime(collectedAtUtc),
-            ["hrvDailyRmssd"] = capture.Hrv ?? 0d,
-            ["ecgStartTime"] = capture.Reading.StartTime?.UtcDateTime,
-            ["ecgFeatures"] = FeaturesToDictionary(capture.Features),
-            ["samplingFrequencyHz"] = capture.SamplingHz,
-            ["scalingFactor"] = capture.ScalingFactor,
-            ["signalQualityScore"] = capture.Features.SignalQualityScore,
-            ["motionArtifactIndex"] = capture.Features.MotionArtifactIndex,
-            ["baselineDriftRatio"] = capture.Features.BaselineDriftRatio,
-            ["waveformBlob"] = capture.CompressedWaveform,
-            ["waveformPreview"] = capture.WaveformPreview.ToArray(),
-            ["metadata"] = metadataDict,
-            ["tags"] = tags,
-            ["notes"] = request?.Notes ?? string.Empty,
-            ["embeddingVector"] = capture.Features.EmbeddingVector?.Select(v => (double)v).ToArray()
-        };
-
-        var docRef = await _db.Collection("ecg_sessions").AddAsync(payload, ct);
-        await _modelState.IncrementSessionCountAsync(1, ct);
-
-        return new EcgSessionRecord(
-            docRef.Id,
-            capture.UserId,
-            capture.Reading.StartTime,
-            capture.Hrv,
-            capture.Features,
+        return await PersistSessionAsync(
+            capture,
             request?.Metadata,
-            capture.WaveformPreview,
-            capture.Features.SignalQualityScore,
-            capture.Features.MotionArtifactIndex,
-            capture.Features.BaselineDriftRatio,
-            capture.SamplingHz,
-            capture.ScalingFactor,
             tags,
-            request?.Notes);
+            request?.Notes,
+            EcgDataSource.Fitbit,
+            ct);
     }
 
     public async Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default)
@@ -154,38 +136,28 @@ public sealed class EcgAuthService : IEcgAuthService
         var sessions = new List<EcgSessionRecord>(snapshot.Count);
 
         foreach (var doc in snapshot.Documents)
-        {
-            var data = doc.ToDictionary();
-            var userId = data.TryGetValue("fitbitUserId", out var userObj) ? userObj?.ToString() ?? string.Empty : string.Empty;
-            var features = TryParseFeatures(data);
-            var metadata = TryParseMetadata(data.TryGetValue("metadata", out var metaObj) ? metaObj : null);
-            var preview = TryParseIntList(data, "waveformPreview") ?? Array.Empty<int>();
-            var tags = TryParseStringList(data, "tags") ?? Array.Empty<string>();
-            var notes = data.TryGetValue("notes", out var notesObj) ? notesObj?.ToString() : null;
-            var samplingHz = data.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 0;
-            var scalingFactor = data.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 0;
-            var signalQuality = TryGetDouble(data, "signalQualityScore") ?? features.SignalQualityScore;
-            var motionArtifact = TryGetDouble(data, "motionArtifactIndex") ?? features.MotionArtifactIndex;
-            var baselineDrift = TryGetDouble(data, "baselineDriftRatio") ?? features.BaselineDriftRatio;
-
-            sessions.Add(new EcgSessionRecord(
-                doc.Id,
-                userId,
-                TryParseDateTimeOffset(data.TryGetValue("ecgStartTime", out var startTimeObj) ? startTimeObj : null),
-                TryGetDouble(data, "hrvDailyRmssd"),
-                features,
-                metadata,
-                preview,
-                signalQuality,
-                motionArtifact,
-                baselineDrift,
-                samplingHz,
-                scalingFactor,
-                tags,
-                notes));
-        }
+            sessions.Add(ToSessionRecord(doc));
 
         return sessions;
+    }
+
+    public async Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default)
+    {
+        var maxPairs = Math.Max(50, request.MaxPairsPerUser);
+        var testFraction = Math.Clamp(request.TestFraction, 0.2, 0.8);
+        var modelPath = BuildBenchmarkModelPath(_modelPath, EcgDataSource.EcgId);
+        var result = await _trainer.TrainWithScopeAsync(modelPath, maxPairs, EcgDatasetScope.EcgIdOnly, testFraction, ct);
+        var stats = await GetDatasetStatsAsync(EcgDataSource.EcgId, ct);
+
+        return new EcgBenchmarkResponse
+        {
+            Dataset = EcgDataSource.EcgId,
+            SubjectCount = stats.SubjectCount,
+            SessionCount = stats.SessionCount,
+            TrainFraction = Math.Round(1 - testFraction, 4),
+            TestFraction = Math.Round(testFraction, 4),
+            Metrics = result
+        };
     }
 
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
@@ -209,6 +181,17 @@ public sealed class EcgAuthService : IEcgAuthService
             baselineSessions);
 
         await LogVerificationAttemptAsync(summary, ct);
+
+        if (summary.Result.Authenticated)
+        {
+            await PersistSessionAsync(
+                attempt,
+                null,
+                new[] { AutoVerifyTag },
+                AutoVerifyNote,
+                EcgDataSource.Fitbit,
+                ct);
+        }
         return summary.Result;
     }
 
@@ -279,6 +262,10 @@ public sealed class EcgAuthService : IEcgAuthService
 
     private async Task<CaptureContext> CaptureSessionAsync(string accessToken, CancellationToken ct)
     {
+        var testCapture = await TryCaptureTestSessionAsync(accessToken, ct);
+        if (testCapture is not null)
+            return testCapture;
+
         var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
         var ecg = await _fitbit.GetLatestEcgAsync(accessToken, null, ct);
         if (ecg?.WaveFormSamples == null || ecg.WaveFormSamples.Count == 0)
@@ -296,6 +283,163 @@ public sealed class EcgAuthService : IEcgAuthService
         var preview = ecg.WaveFormSamples.Take(Math.Min(64, ecg.WaveFormSamples.Count)).ToArray();
 
         return new CaptureContext(userId, ecg, features, hrv, compressed, preview, samplingHz, scalingFactor);
+    }
+
+    private async Task<CaptureContext?> TryCaptureTestSessionAsync(string accessToken, CancellationToken ct)
+    {
+        if (!_bypassFitbit)
+            return null;
+
+        var httpContext = _httpContextAccessor?.HttpContext;
+        string? explicitSessionId = null;
+        if (httpContext is not null && httpContext.Items.TryGetValue("TestSessionId", out var item) && item is string sessionId && !string.IsNullOrWhiteSpace(sessionId))
+            explicitSessionId = sessionId;
+
+        var selection = !string.IsNullOrWhiteSpace(explicitSessionId)
+            ? new TestSelection(explicitSessionId, null)
+            : TestSelection.FromAccessToken(accessToken);
+
+        var snapshot = await LoadTestSessionSnapshotAsync(selection, ct);
+        if (snapshot is null || !snapshot.Exists)
+            throw new InvalidOperationException("No stored ECG sessions available for offline verification.");
+
+        return BuildCaptureContextFromSnapshot(snapshot);
+    }
+
+    private async Task<DocumentSnapshot?> LoadTestSessionSnapshotAsync(TestSelection selection, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(selection.SessionId))
+            return await _db.Collection("ecg_sessions").Document(selection.SessionId).GetSnapshotAsync(ct);
+
+        Query query = _db.Collection("ecg_sessions");
+        if (!string.IsNullOrWhiteSpace(selection.UserId))
+            query = query.WhereEqualTo("fitbitUserId", selection.UserId);
+
+        query = query.OrderByDescending("collectedAtUtc").Limit(1);
+        var results = await query.GetSnapshotAsync(ct);
+        return results.Documents.FirstOrDefault();
+    }
+
+    private CaptureContext BuildCaptureContextFromSnapshot(DocumentSnapshot doc)
+    {
+        var data = doc.ToDictionary();
+        var userId = data.TryGetValue("fitbitUserId", out var userObj) ? userObj?.ToString() ?? string.Empty : string.Empty;
+        if (string.IsNullOrWhiteSpace(userId))
+            throw new InvalidOperationException("Stored session missing fitbitUserId.");
+
+        var waveform = WaveformCompressor.Decompress(data.TryGetValue("waveformBlob", out var blobObj) ? blobObj?.ToString() : null);
+        if (waveform is null || waveform.Length == 0)
+            throw new InvalidOperationException("Stored session missing waveform data.");
+
+        var samplingHz = data.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 250;
+        var scalingFactor = data.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 10922;
+        var features = TryParseFeatures(data);
+        if (features.EmbeddingVector is null || features.EmbeddingVector.Length == 0)
+        {
+            var embedding = _embedding.GenerateEmbedding(waveform, scalingFactor, samplingHz);
+            if (embedding is { Length: > 0 })
+                features = features with { EmbeddingVector = embedding };
+        }
+
+        var reading = new EcgReading
+        {
+            StartTime = TryParseDateTimeOffset(data.TryGetValue("ecgStartTime", out var startObj) ? startObj : null),
+            SamplingFrequencyHz = samplingHz,
+            ScalingFactor = scalingFactor,
+            NumberOfWaveformSamples = waveform.Length,
+            WaveFormSamples = waveform.ToList()
+        };
+
+        var preview = TryParseIntList(data, "waveformPreview") ?? waveform.Take(Math.Min(64, waveform.Length)).ToArray();
+        var compressed = data.TryGetValue("waveformBlob", out var compressedObj) ? compressedObj?.ToString() ?? string.Empty : string.Empty;
+        if (string.IsNullOrWhiteSpace(compressed))
+            compressed = WaveformCompressor.Compress(waveform);
+
+        return new CaptureContext(
+            userId,
+            reading,
+            features,
+            TryGetDouble(data, "hrvDailyRmssd"),
+            compressed,
+            preview,
+            samplingHz,
+            scalingFactor);
+    }
+
+    private async Task<EcgSessionRecord> PersistSessionAsync(
+        CaptureContext capture,
+        SessionMetadata? metadata,
+        IReadOnlyCollection<string>? tags,
+        string? notes,
+        string dataSource,
+        CancellationToken ct)
+    {
+        if (capture.Reading.StartTime is DateTimeOffset startTime)
+        {
+            var existing = await TryGetExistingSessionAsync(capture.UserId, startTime, ct);
+            if (existing is not null)
+                return existing;
+        }
+
+        var collectedAtUtc = DateTime.UtcNow;
+        var metadataDict = ToMetadataDictionary(metadata);
+        var normalizedTags = tags?.Where(t => !string.IsNullOrWhiteSpace(t))
+            .Select(t => t.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? new List<string>();
+
+        var payload = new Dictionary<string, object>
+        {
+            ["fitbitUserId"] = capture.UserId,
+            ["dataSource"] = dataSource,
+            ["sessionTimeUtc"] = Timestamp.FromDateTime(collectedAtUtc),
+            ["collectedAtUtc"] = Timestamp.FromDateTime(collectedAtUtc),
+            ["hrvDailyRmssd"] = capture.Hrv ?? 0d,
+            ["ecgStartTime"] = capture.Reading.StartTime?.UtcDateTime,
+            ["ecgFeatures"] = FeaturesToDictionary(capture.Features),
+            ["samplingFrequencyHz"] = capture.SamplingHz,
+            ["scalingFactor"] = capture.ScalingFactor,
+            ["signalQualityScore"] = capture.Features.SignalQualityScore,
+            ["motionArtifactIndex"] = capture.Features.MotionArtifactIndex,
+            ["baselineDriftRatio"] = capture.Features.BaselineDriftRatio,
+            ["waveformBlob"] = capture.CompressedWaveform,
+            ["waveformPreview"] = capture.WaveformPreview.ToArray(),
+            ["metadata"] = metadataDict,
+            ["tags"] = normalizedTags,
+            ["notes"] = notes ?? string.Empty,
+            ["embeddingVector"] = capture.Features.EmbeddingVector?.Select(v => (double)v).ToArray()
+        };
+
+        var docRef = await _db.Collection("ecg_sessions").AddAsync(payload, ct);
+        await _modelState.IncrementSessionCountAsync(1, ct);
+
+        return new EcgSessionRecord(
+            docRef.Id,
+            capture.UserId,
+            dataSource,
+            capture.Reading.StartTime,
+            capture.Hrv,
+            capture.Features,
+            metadata,
+            capture.WaveformPreview,
+            capture.Features.SignalQualityScore,
+            capture.Features.MotionArtifactIndex,
+            capture.Features.BaselineDriftRatio,
+            capture.SamplingHz,
+            capture.ScalingFactor,
+            normalizedTags,
+            notes);
+    }
+
+    private async Task<EcgSessionRecord?> TryGetExistingSessionAsync(string userId, DateTimeOffset startTime, CancellationToken ct)
+    {
+        var query = _db.Collection("ecg_sessions")
+            .WhereEqualTo("fitbitUserId", userId)
+            .WhereEqualTo("ecgStartTime", startTime.UtcDateTime)
+            .Limit(1);
+        var snapshot = await query.GetSnapshotAsync(ct);
+        var existing = snapshot.Documents.FirstOrDefault();
+        return existing is null ? null : ToSessionRecord(existing);
     }
 
     private async Task<VerificationSummary> ScoreAttemptAsync(
@@ -643,6 +787,64 @@ public sealed class EcgAuthService : IEcgAuthService
         return dict;
     }
 
+    private async Task<(int SessionCount, int SubjectCount)> GetDatasetStatsAsync(string dataset, CancellationToken ct)
+    {
+        var snapshot = await _db.Collection("ecg_sessions").GetSnapshotAsync(ct);
+        var normalizedTarget = dataset?.Trim().ToLowerInvariant() ?? string.Empty;
+        var uniqueUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sessionCount = 0;
+
+        foreach (var doc in snapshot.Documents)
+        {
+            var payload = doc.ToDictionary();
+            var source = EcgDataSource.Resolve(payload);
+            if (!string.Equals(source, normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            sessionCount++;
+            if (payload.TryGetValue("fitbitUserId", out var userObj) && userObj is not null)
+            {
+                var userId = userObj.ToString();
+                if (!string.IsNullOrWhiteSpace(userId))
+                    uniqueUsers.Add(userId);
+            }
+        }
+
+        return (sessionCount, uniqueUsers.Count);
+    }
+
+    private static string BuildBenchmarkModelPath(string modelPath, string suffix)
+    {
+        var directory = Path.GetDirectoryName(modelPath);
+        var fileName = Path.GetFileNameWithoutExtension(modelPath);
+        var sanitizedSuffix = string.IsNullOrWhiteSpace(suffix) ? "dataset" : suffix.Trim().ToLowerInvariant();
+        var benchmarkName = string.IsNullOrWhiteSpace(fileName)
+            ? $"ecg_auth_model_{sanitizedSuffix}.zip"
+            : $"{fileName}_{sanitizedSuffix}.zip";
+        return string.IsNullOrWhiteSpace(directory) ? benchmarkName : Path.Combine(directory, benchmarkName);
+    }
+
+    private sealed record TestSelection(string? SessionId, string? UserId)
+    {
+        public static TestSelection FromAccessToken(string? token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return new TestSelection(null, null);
+
+            var value = token.Trim();
+            const string SessionPrefix = "session:";
+            const string UserPrefix = "user:";
+
+            if (value.StartsWith(SessionPrefix, StringComparison.OrdinalIgnoreCase))
+                return new TestSelection(value[SessionPrefix.Length..], null);
+
+            if (value.StartsWith(UserPrefix, StringComparison.OrdinalIgnoreCase))
+                return new TestSelection(null, value[UserPrefix.Length..]);
+
+            return new TestSelection(null, null);
+        }
+    }
+
     private sealed record CaptureContext(
         string UserId,
         EcgReading Reading,
@@ -803,4 +1005,39 @@ public sealed class EcgAuthService : IEcgAuthService
         var corrected = correction.Predict(correctionInput);
         return corrected.Probability;
     }
+
+    private EcgSessionRecord ToSessionRecord(DocumentSnapshot doc)
+    {
+        var data = doc.ToDictionary();
+        var userId = data.TryGetValue("fitbitUserId", out var userObj) ? userObj?.ToString() ?? string.Empty : string.Empty;
+        var dataSource = EcgDataSource.Resolve(data);
+        var features = TryParseFeatures(data);
+        var metadata = TryParseMetadata(data.TryGetValue("metadata", out var metaObj) ? metaObj : null);
+        var preview = TryParseIntList(data, "waveformPreview") ?? Array.Empty<int>();
+        var tags = TryParseStringList(data, "tags") ?? Array.Empty<string>();
+        var notes = data.TryGetValue("notes", out var notesObj) ? notesObj?.ToString() : null;
+        var samplingHz = data.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 0;
+        var scalingFactor = data.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 0;
+        var signalQuality = TryGetDouble(data, "signalQualityScore") ?? features.SignalQualityScore;
+        var motionArtifact = TryGetDouble(data, "motionArtifactIndex") ?? features.MotionArtifactIndex;
+        var baselineDrift = TryGetDouble(data, "baselineDriftRatio") ?? features.BaselineDriftRatio;
+
+        return new EcgSessionRecord(
+            doc.Id,
+            userId,
+            dataSource,
+            TryParseDateTimeOffset(data.TryGetValue("ecgStartTime", out var startTimeObj) ? startTimeObj : null),
+            TryGetDouble(data, "hrvDailyRmssd"),
+            features,
+            metadata,
+            preview,
+            signalQuality,
+            motionArtifact,
+            baselineDrift,
+            samplingHz,
+            scalingFactor,
+            tags,
+            notes);
+    }
+
 }
