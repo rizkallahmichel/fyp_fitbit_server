@@ -76,4 +76,12 @@ public sealed class EcgAuthController : ControllerBase
         var sessions = await _authService.GetSessionsAsync(ct);
         return Ok(sessions);
     }
+
+    [HttpPost("benchmark-ecg-id")]
+    public async Task<IActionResult> BenchmarkEcgId([FromBody] EcgBenchmarkRequest? request, CancellationToken ct = default)
+    {
+        var payload = request ?? new EcgBenchmarkRequest();
+        var result = await _authService.BenchmarkEcgIdAsync(payload, ct);
+        return Ok(result);
+    }
 }

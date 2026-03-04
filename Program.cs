@@ -118,15 +118,36 @@ namespace FitServer
             app.UseAuthorization();
 
             var disableFitbitMiddleware = builder.Configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
+            var defaultTestAccessToken = builder.Configuration.GetValue<string>("Fitbit:TestAccessToken");
+            var defaultTestSessionId = builder.Configuration.GetValue<string>("Fitbit:TestSessionId");
             if (disableFitbitMiddleware)
             {
                 app.Use(async (context, next) =>
                 {
-                    if (!context.Items.ContainsKey("AccessToken") &&
-                        context.Request.Headers.TryGetValue("X-Test-AccessToken", out var headerValue) &&
-                        !StringValues.IsNullOrEmpty(headerValue))
+                    if (!context.Items.ContainsKey("AccessToken"))
                     {
-                        context.Items["AccessToken"] = headerValue.ToString();
+                        if (context.Request.Headers.TryGetValue("X-Test-AccessToken", out var headerValue) &&
+                            !StringValues.IsNullOrEmpty(headerValue))
+                        {
+                            context.Items["AccessToken"] = headerValue.ToString();
+                        }
+                        else if (!string.IsNullOrWhiteSpace(defaultTestAccessToken))
+                        {
+                            context.Items["AccessToken"] = defaultTestAccessToken;
+                        }
+                    }
+
+                    if (!context.Items.ContainsKey("TestSessionId"))
+                    {
+                        if (context.Request.Headers.TryGetValue("X-Test-SessionId", out var sessionHeader) &&
+                            !StringValues.IsNullOrEmpty(sessionHeader))
+                        {
+                            context.Items["TestSessionId"] = sessionHeader.ToString();
+                        }
+                        else if (!string.IsNullOrWhiteSpace(defaultTestSessionId))
+                        {
+                            context.Items["TestSessionId"] = defaultTestSessionId;
+                        }
                     }
 
                     await next();

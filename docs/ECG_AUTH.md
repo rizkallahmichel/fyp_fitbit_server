@@ -45,6 +45,23 @@ The response contains accuracy, AUC, and F1. The trained file is saved to
    enrollment session.
 3. Evaluate FAR/FRR manually: run genuine attempts and impostor attempts, then
    adjust `threshold` to hit your target (e.g., operate near Equal Error Rate).
+4. Successful verify calls now persist the captured waveform back into `ecg_sessions` with an `auto-verify` tag, so your Fitbit dataset grows even if you skip `/collect-session`.
 
 All verification attempts are logged to Firestore (`ecg_auth_logs`) so you can
 compute FAR/FRR offline later.
+
+## 5. Benchmark ECG-ID protocol (Safie et al., 2024)
+
+Use this endpoint when you want to replicate the Safie et al. split without involving Fitbit data:
+
+```
+POST /api/ecg-auth/benchmark-ecg-id
+{
+  "maxPairsPerUser": 600,
+  "testFraction": 0.4
+}
+```
+
+- Only sessions tagged with `dataSource = ecg-id` (or an `ecg-id` tag) are kept.
+- Training runs the existing feature extraction + LightGBM stack but enforces the 60/40 train/test split from the paper.
+- The response returns dataset stats (subjects/sessions) plus Accuracy/AUC/F1 so you can cite a like-for-like comparison in your thesis.

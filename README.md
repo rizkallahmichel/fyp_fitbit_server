@@ -10,6 +10,8 @@ FitServer is an ASP.NET Core 9.0 backend that ingests Fitbit ECG/HRV sessions, t
 - **Middleware**: `FitbitAuthMiddleware` refreshes Fitbit OAuth tokens; tests can toggle it via `Fitbit:DisableAuthMiddleware`.
 - **Data stores**: Firestore collections (`ecg_sessions`, `ecg_auth_logs`, `ecg_confidence`, `ecg_model_state`) plus local model artifacts (`ecg_auth_model.zip`).
 - **External datasets**: Fitbit sessions are now complemented by curated samples imported from the public ECG-ID database, increasing class diversity for model training/validation.
+- **ECG-ID benchmark endpoint**: call `POST /api/ecg-auth/benchmark-ecg-id` to reproduce the Safie et al. (2024) 60/40 split on the ECG-ID subset only and capture Accuracy/AUC/F1 deltas without touching Fitbit data.
+- **Verified-session harvesting**: successful `/api/ecg-auth/verify` calls now persist the captured waveform back into Firestore (`auto-verify` tag) so the adaptive model gains additional Fitbit samples over time.
 
 ## Prerequisites
 | Requirement | Purpose |

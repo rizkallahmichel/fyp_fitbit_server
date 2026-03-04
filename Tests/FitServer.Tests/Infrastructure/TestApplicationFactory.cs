@@ -99,6 +99,11 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     {
         public Task<ModelTrainingResult> TrainAndSaveAsync(string modelPath, int maxPairsPerUser, CancellationToken ct = default)
         {
+            return TrainWithScopeAsync(modelPath, maxPairsPerUser, EcgDatasetScope.All, 0.2, ct);
+        }
+
+        public Task<ModelTrainingResult> TrainWithScopeAsync(string modelPath, int maxPairsPerUser, EcgDatasetScope scope, double testFraction, CancellationToken ct = default)
+        {
             var result = new ModelTrainingResult(modelPath, $"{modelPath}_correction", 0.9, 0.9, 0.9, 20, 100);
             return Task.FromResult(result);
         }
