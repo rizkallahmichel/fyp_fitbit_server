@@ -58,6 +58,24 @@ public sealed class EcgAuthController : ControllerBase
         }
     }
 
+    [HttpGet("current-user")]
+    public async Task<IActionResult> GetCurrentUser(CancellationToken ct = default)
+    {
+        var accessToken = HttpContext.Items["AccessToken"] as string;
+        if (string.IsNullOrWhiteSpace(accessToken))
+            return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
+
+        try
+        {
+            var user = await _authService.GetCurrentUserAsync(accessToken, ct);
+            return Ok(user);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
     [HttpPost("continuous-verify")]
     public async Task<IActionResult> ContinuousVerify([FromBody] ContinuousVerifyRequest? request, CancellationToken ct = default)
     {
@@ -77,11 +95,33 @@ public sealed class EcgAuthController : ControllerBase
         return Ok(sessions);
     }
 
+    [HttpGet("data-overview")]
+    public async Task<IActionResult> GetDataOverview(CancellationToken ct)
+    {
+        var overview = await _authService.GetDataOverviewAsync(ct);
+        return Ok(overview);
+    }
+
     [HttpPost("benchmark-ecg-id")]
     public async Task<IActionResult> BenchmarkEcgId([FromBody] EcgBenchmarkRequest? request, CancellationToken ct = default)
     {
         var payload = request ?? new EcgBenchmarkRequest();
         var result = await _authService.BenchmarkEcgIdAsync(payload, ct);
         return Ok(result);
+    }
+
+    [HttpPost("report-false-attempt")]
+    public async Task<IActionResult> ReportFalseAttempt([FromBody] FalseAttemptReportRequest? request, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = request ?? new FalseAttemptReportRequest();
+            var response = await _authService.ReportFalseAttemptAsync(payload, ct);
+            return Ok(response);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 }

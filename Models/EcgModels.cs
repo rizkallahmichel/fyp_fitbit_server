@@ -62,6 +62,15 @@ public sealed class FitbitUser
     public string? DisplayName { get; set; }
 }
 
+public sealed class CurrentFitbitUserResponse
+{
+    [JsonPropertyName("fitbitUserId")]
+    public string FitbitUserId { get; set; } = string.Empty;
+
+    [JsonPropertyName("displayName")]
+    public string? DisplayName { get; set; }
+}
+
 public sealed class SessionCaptureRequest
 {
     [JsonPropertyName("metadata")]
@@ -129,4 +138,34 @@ public sealed class ContinuousVerifyResponse
 
     [JsonPropertyName("samples")]
     public List<ContinuousVerifySample> Samples { get; set; } = new();
+}
+
+public sealed class FalseAttemptReportRequest
+{
+    [JsonPropertyName("fitbitUserId")]
+    public string FitbitUserId { get; set; } = string.Empty;
+
+    [JsonPropertyName("ecgStartTime")]
+    public DateTimeOffset? EcgStartTime { get; set; }
+
+    [JsonPropertyName("notes")]
+    public string? Notes { get; set; }
+}
+
+public sealed class FalseAttemptReportResponse
+{
+    [JsonPropertyName("fitbitUserId")]
+    public string FitbitUserId { get; set; } = string.Empty;
+
+    [JsonPropertyName("ecgStartTime")]
+    public DateTimeOffset? EcgStartTime { get; set; }
+
+    [JsonPropertyName("sessionDocumentId")]
+    public string SessionDocumentId { get; set; } = string.Empty;
+
+    [JsonPropertyName("tags")]
+    public IReadOnlyList<string> Tags { get; set; } = Array.Empty<string>();
+
+    [JsonPropertyName("retrainRequested")]
+    public bool RetrainRequested { get; set; }
 }

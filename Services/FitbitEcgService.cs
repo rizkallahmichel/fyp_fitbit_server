@@ -10,6 +10,7 @@ public interface IFitbitEcgService
     Task<EcgReading?> GetLatestEcgAsync(string accessToken, DateOnly? afterDate = null, CancellationToken ct = default);
     Task<IReadOnlyList<EcgReading>> GetRecentEcgsAsync(string accessToken, int limit, DateOnly? afterDate = null, CancellationToken ct = default);
     Task<double?> GetDailyHrvAsync(string accessToken, DateOnly date, CancellationToken ct = default);
+    Task<CurrentFitbitUserResponse> GetCurrentUserAsync(string accessToken, CancellationToken ct = default);
     Task<string> GetFitbitUserIdAsync(string accessToken, CancellationToken ct = default);
 }
 
@@ -102,6 +103,12 @@ public sealed class FitbitEcgService : IFitbitEcgService
 
     public async Task<string> GetFitbitUserIdAsync(string accessToken, CancellationToken ct = default)
     {
+        var profile = await GetCurrentUserAsync(accessToken, ct);
+        return profile.FitbitUserId;
+    }
+
+    public async Task<CurrentFitbitUserResponse> GetCurrentUserAsync(string accessToken, CancellationToken ct = default)
+    {
         var client = CreateClient(accessToken);
         using var response = await client.GetAsync("https://api.fitbit.com/1/user/-/profile.json", ct);
         response.EnsureSuccessStatusCode();
@@ -112,7 +119,11 @@ public sealed class FitbitEcgService : IFitbitEcgService
         if (string.IsNullOrWhiteSpace(id))
             throw new InvalidOperationException("Unable to resolve Fitbit encodedId.");
 
-        return id!;
+        return new CurrentFitbitUserResponse
+        {
+            FitbitUserId = id!,
+            DisplayName = string.IsNullOrWhiteSpace(profile?.User?.DisplayName) ? null : profile.User.DisplayName
+        };
     }
 
     private HttpClient CreateClient(string accessToken)

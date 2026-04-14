@@ -45,7 +45,20 @@ The response contains accuracy, AUC, and F1. The trained file is saved to
    enrollment session.
 3. Evaluate FAR/FRR manually: run genuine attempts and impostor attempts, then
    adjust `threshold` to hit your target (e.g., operate near Equal Error Rate).
-4. Successful verify calls now persist the captured waveform back into `ecg_sessions` with an `auto-verify` tag, so your Fitbit dataset grows even if you skip `/collect-session`.
+4. By default, verify calls do **not** auto-enroll captured waveforms. Use `/collect-session` for curated enrollment to avoid dataset poisoning.
+5. If one attempt is later confirmed as impostor, report it so retraining can use it as a hard negative:
+   ```
+   POST /api/ecg-auth/report-false-attempt
+   {
+     "fitbitUserId": "BTNYKG",
+     "ecgStartTime": "2026-04-14T14:48:30.992+02:00",
+     "notes": "confirmed impostor"
+   }
+   ```
+   Then retrain with:
+   ```
+   POST /api/ecg-auth/train?maxPairsPerUser=500
+   ```
 
 All verification attempts are logged to Firestore (`ecg_auth_logs`) so you can
 compute FAR/FRR offline later.
