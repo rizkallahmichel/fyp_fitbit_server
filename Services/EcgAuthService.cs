@@ -38,15 +38,25 @@ public sealed record VerifyResult(
     IReadOnlyList<double> ComparisonScores,
     double ConsensusScore,
     int PassingVotes,
-    ConfidenceSnapshot? Confidence);
+    ConfidenceSnapshot? Confidence,
+    double PassRatio = 0d,
+    double MedianScore = 0d,
+    double WorstScore = 0d,
+    double ImpostorBestScore = 0d,
+    double ImpostorConsensusScore = 0d,
+    double BestSeparation = 0d,
+    double ConsensusSeparation = 0d);
 
 public interface IEcgAuthService
 {
+    Task<CurrentFitbitUserResponse> GetCurrentUserAsync(string accessToken, CancellationToken ct = default);
     Task<EcgSessionRecord> CollectSessionAsync(string accessToken, SessionCaptureRequest? request, CancellationToken ct = default);
     Task<ModelTrainingResult> TrainModelAsync(int maxPairsPerUser, CancellationToken ct = default);
     Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default);
     Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default);
+    Task<FalseAttemptReportResponse> ReportFalseAttemptAsync(FalseAttemptReportRequest request, CancellationToken ct = default);
     Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default);
+    Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default);
     Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default);
 }
 
@@ -55,8 +65,19 @@ public sealed class EcgAuthService : IEcgAuthService
     private const double DefaultThreshold = 0.85;
     private const int VerificationBaselineCount = 0;
     private const int ScoreConsensusTopK = 3;
+    private const int ImpostorConsensusTopK = 3;
+    private const int ImpostorUsersToSample = 8;
+    private const int ImpostorSessionsPerUser = 2;
+    private const int MinimumBaselineSessions = 5;
+    private const double MinimumPassingRatio = 0.9;
+    private const double MaxOutlierDrop = 0.15;
+    private const double MinimumGenuineImpostorMargin = 0.03;
+    private const bool IncludeAutoVerifySessionsInBaseline = false;
+    private const bool EnableAutoVerifyEnrollment = false;
     private const string AutoVerifyTag = "auto-verify";
     private const string AutoVerifyNote = "Captured automatically after successful /verify.";
+    private const string FalseAttemptTag = "false-attempt";
+    private const string ImpostorTag = "impostor";
     private readonly IFitbitEcgService _fitbit;
     private readonly IEcgFeatureExtractor _extractor;
     private readonly IEcgMlTrainer _trainer;
@@ -141,6 +162,93 @@ public sealed class EcgAuthService : IEcgAuthService
         return sessions;
     }
 
+    public async Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default)
+    {
+        var sessionsSnapshot = await _db.Collection("ecg_sessions").GetSnapshotAsync(ct);
+        var authLogsSnapshot = await _db.Collection("ecg_auth_logs").GetSnapshotAsync(ct);
+        var confidenceSnapshot = await _db.Collection("ecg_confidence").GetSnapshotAsync(ct);
+        var fitbitDataSnapshot = await _db.Collection("fitbit_data").GetSnapshotAsync(ct);
+        var modelState = await _modelState.GetAsync(ct);
+
+        var sessions = sessionsSnapshot.Documents
+            .Select(ToSessionRecord)
+            .OrderByDescending(session => session.EcgStartTime ?? DateTimeOffset.MinValue)
+            .ToList();
+
+        var participants = sessions
+            .Where(session => !string.IsNullOrWhiteSpace(session.FitbitUserId))
+            .GroupBy(session => session.FitbitUserId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new EcgParticipantOverview
+            {
+                FitbitUserId = group.Key,
+                SessionCount = group.Count(),
+                LastSessionAtUtc = group.Max(item => item.EcgStartTime)
+            })
+            .OrderByDescending(item => item.SessionCount)
+            .ThenBy(item => item.FitbitUserId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var recentSessions = sessions
+            .Take(5)
+            .Select(session => new EcgSessionPreview
+            {
+                DocumentId = session.DocumentId,
+                FitbitUserId = session.FitbitUserId,
+                DataSource = session.DataSource,
+                EcgStartTimeUtc = session.EcgStartTime,
+                SignalQualityScore = session.SignalQualityScore,
+                Tags = session.Tags.ToList()
+            })
+            .ToList();
+
+        var recentVerificationLogs = authLogsSnapshot.Documents
+            .Select(MapVerificationLog)
+            .OrderByDescending(log => log.AttemptedAtUtc ?? DateTimeOffset.MinValue)
+            .Take(5)
+            .ToList();
+
+        var collections = new List<EcgCollectionOverview>
+        {
+            BuildCollectionOverview("ecg_sessions", sessionsSnapshot.Count, sessions.Max(session => session.EcgStartTime), $"{participants.Count} known participant(s)"),
+            BuildCollectionOverview("ecg_auth_logs", authLogsSnapshot.Count, ExtractLatestTimestamp(authLogsSnapshot.Documents, "attemptedAtUtc"), $"{recentVerificationLogs.Count} recent verification preview item(s)"),
+            BuildCollectionOverview("ecg_confidence", confidenceSnapshot.Count, ExtractLatestTimestamp(confidenceSnapshot.Documents, "updatedAtUtc"), "Per-user confidence drift state"),
+            BuildCollectionOverview("fitbit_data", fitbitDataSnapshot.Count, ExtractLatestTimestamp(fitbitDataSnapshot.Documents, "date"), "Raw Fitbit data snapshots"),
+            BuildCollectionOverview("ecg_model_state", modelState.LastTrainedUtc is null && modelState.SessionCount == 0 ? 0 : 1, modelState.LastTrainedUtc, modelState.RetrainPending ? "Retrain pending" : "Model state available")
+        };
+
+        var notes = new List<string>();
+        if (sessions.Count == 0)
+            notes.Add("No documents found in Firestore collection ecg_sessions. The UI participant selector will stay empty.");
+        if (sessions.Count > 0 && participants.Count == 0)
+            notes.Add("ECG sessions exist but no usable fitbitUserId was found.");
+        if (sessions.Count == 0 && fitbitDataSnapshot.Count > 0)
+            notes.Add("fitbit_data contains documents, but ecg_sessions is still empty. Collection has not been persisted into the authentication dataset yet.");
+        if (authLogsSnapshot.Count == 0)
+            notes.Add("No verification logs found yet in ecg_auth_logs.");
+        if (modelState.SessionCount > 0 && modelState.SessionCount != sessions.Count)
+            notes.Add($"Model state reports {modelState.SessionCount} session(s) while ecg_sessions currently exposes {sessions.Count} document(s).");
+
+        return new EcgDataOverviewResponse
+        {
+            Collections = collections,
+            Participants = participants,
+            RecentSessions = recentSessions,
+            RecentVerificationLogs = recentVerificationLogs,
+            ModelState = new EcgModelStateOverview
+            {
+                LastTrainedUtc = modelState.LastTrainedUtc,
+                SessionCount = modelState.SessionCount,
+                SessionCountAtLastTrain = modelState.SessionCountAtLastTrain,
+                RetrainPending = modelState.RetrainPending,
+                RetrainReason = modelState.RetrainReason,
+                LastAccuracy = modelState.LastAccuracy,
+                LastAreaUnderRocCurve = modelState.LastAreaUnderRocCurve,
+                LastF1Score = modelState.LastF1Score
+            },
+            Notes = notes
+        };
+    }
+
     public async Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default)
     {
         var maxPairs = Math.Max(50, request.MaxPairsPerUser);
@@ -160,13 +268,24 @@ public sealed class EcgAuthService : IEcgAuthService
         };
     }
 
+    public Task<CurrentFitbitUserResponse> GetCurrentUserAsync(string accessToken, CancellationToken ct = default)
+    {
+        return _fitbit.GetCurrentUserAsync(accessToken, ct);
+    }
+
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
     {
         var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
         var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct);
+        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
+        if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
+            baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, includeAutoVerify: true);
         if (baselineSessions.Count == 0)
             throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
+        if (baselineSessions.Count < MinimumBaselineSessions)
+            throw new InvalidOperationException($"At least {MinimumBaselineSessions} ECG enrollment sessions are required for reliable verification.");
+
+        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
 
         var attempt = await CaptureSessionAsync(accessToken, ct);
         var attemptFeatures = attempt.Features;
@@ -178,11 +297,16 @@ public sealed class EcgAuthService : IEcgAuthService
             attempt.Hrv,
             threshold,
             ct,
-            baselineSessions);
+            baselineSessions,
+            impostorSessions);
 
         await LogVerificationAttemptAsync(summary, ct);
 
-        if (summary.Result.Authenticated)
+        if (summary.Result.Authenticated &&
+            EnableAutoVerifyEnrollment &&
+            summary.Result.PassRatio >= 0.98 &&
+            summary.Result.BestSeparation >= 0.1 &&
+            summary.Result.ConsensusSeparation >= 0.1)
         {
             await PersistSessionAsync(
                 attempt,
@@ -204,9 +328,15 @@ public sealed class EcgAuthService : IEcgAuthService
         var slices = Math.Max(1, (int)Math.Ceiling(windowMinutes / (double)strideMinutes));
         var perRequestLimit = Math.Min(20, slices + 1);
         var baselineLimit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-        var baselineSessions = await LoadSessionsForUserAsync(userId, baselineLimit, ct);
+        var baselineSessions = await LoadSessionsForUserAsync(userId, baselineLimit, ct, IncludeAutoVerifySessionsInBaseline);
+        if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
+            baselineSessions = await LoadSessionsForUserAsync(userId, baselineLimit, ct, includeAutoVerify: true);
         if (baselineSessions.Count == 0)
             throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
+        if (baselineSessions.Count < MinimumBaselineSessions)
+            throw new InvalidOperationException($"At least {MinimumBaselineSessions} ECG enrollment sessions are required for reliable verification.");
+
+        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
 
         var hrv = await _fitbit.GetDailyHrvAsync(accessToken, DateOnly.FromDateTime(DateTime.UtcNow), ct);
         var readings = await _fitbit.GetRecentEcgsAsync(accessToken, perRequestLimit, DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), ct);
@@ -235,7 +365,8 @@ public sealed class EcgAuthService : IEcgAuthService
                 hrv,
                 threshold,
                 ct,
-                baselineSessions);
+                baselineSessions,
+                impostorSessions);
 
             await LogVerificationAttemptAsync(summary, ct);
             samples.Add(new ContinuousVerifySample
@@ -257,6 +388,65 @@ public sealed class EcgAuthService : IEcgAuthService
             RollingMeanScore = scores.Average(),
             RollingWorstScore = scores.Min(),
             Samples = samples
+        };
+    }
+
+    public async Task<FalseAttemptReportResponse> ReportFalseAttemptAsync(FalseAttemptReportRequest request, CancellationToken ct = default)
+    {
+        if (request is null)
+            throw new InvalidOperationException("Request body is required.");
+        if (string.IsNullOrWhiteSpace(request.FitbitUserId))
+            throw new InvalidOperationException("fitbitUserId is required.");
+        if (request.EcgStartTime is null)
+            throw new InvalidOperationException("ecgStartTime is required.");
+
+        var userId = request.FitbitUserId.Trim();
+        var startTimeUtc = request.EcgStartTime.Value.UtcDateTime;
+        var snapshot = await _db.Collection("ecg_sessions")
+            .WhereEqualTo("fitbitUserId", userId)
+            .WhereEqualTo("ecgStartTime", startTimeUtc)
+            .Limit(1)
+            .GetSnapshotAsync(ct);
+
+        var session = snapshot.Documents.FirstOrDefault();
+        if (session is null)
+            throw new InvalidOperationException($"No ECG session found for {userId} at {request.EcgStartTime.Value:O}. The sample may not have been persisted.");
+
+        var payload = session.ToDictionary();
+        var existingTags = TryParseStringList(payload, "tags") ?? Array.Empty<string>();
+        var tags = existingTags
+            .Concat(new[] { FalseAttemptTag, ImpostorTag })
+            .Where(tag => !string.IsNullOrWhiteSpace(tag))
+            .Select(tag => tag.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var existingNotes = payload.TryGetValue("notes", out var notesObj) ? notesObj?.ToString() ?? string.Empty : string.Empty;
+        var reason = string.IsNullOrWhiteSpace(request.Notes) ? "Reported by operator." : request.Notes.Trim();
+        var securityNote = $"[SECURITY {DateTime.UtcNow:O}] Marked as false attempt/impostor. {reason}";
+        var updatedNotes = string.IsNullOrWhiteSpace(existingNotes)
+            ? securityNote
+            : $"{existingNotes}\n{securityNote}";
+
+        await session.Reference.SetAsync(new Dictionary<string, object>
+        {
+            ["tags"] = tags,
+            ["notes"] = updatedNotes,
+            ["securityLabel"] = ImpostorTag,
+            ["falseAttemptReportedAtUtc"] = Timestamp.FromDateTime(DateTime.UtcNow)
+        }, SetOptions.MergeAll, ct);
+
+        var retrainRequested = await _modelState.TryRequestRetrainAsync(
+            $"False attempt reported for {userId} at {request.EcgStartTime.Value:O}",
+            ct);
+
+        return new FalseAttemptReportResponse
+        {
+            FitbitUserId = userId,
+            EcgStartTime = request.EcgStartTime,
+            SessionDocumentId = session.Id,
+            Tags = tags,
+            RetrainRequested = retrainRequested
         };
     }
 
@@ -449,13 +639,14 @@ public sealed class EcgAuthService : IEcgAuthService
         double? hrv,
         double threshold,
         CancellationToken ct,
-        IReadOnlyList<EcgSession>? cachedSessions = null)
+        IReadOnlyList<EcgSession>? cachedSessions = null,
+        IReadOnlyList<EcgSession>? cachedImpostorSessions = null)
     {
         IReadOnlyList<EcgSession> storedSessions;
         if (cachedSessions is null)
         {
             var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-            storedSessions = await LoadSessionsForUserAsync(userId, limit, ct);
+            storedSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
         }
         else
         {
@@ -486,11 +677,56 @@ public sealed class EcgAuthService : IEcgAuthService
         var topScores = orderedScores.Take(topK).ToList();
         var consensusScore = topScores.Count > 0 ? topScores.Average() : 0d;
         var bestScore = orderedScores.Count > 0 ? orderedScores[0] : 0d;
+        var worstScore = orderedScores.Count > 0 ? orderedScores[^1] : 0d;
+        var medianScore = ComputeMedian(scores);
         var passingVotes = scores.Count(s => s >= appliedThreshold);
+        var passRatio = scores.Count > 0 ? passingVotes / (double)scores.Count : 0d;
         var latestPasses = latestScore is not null && latestScore.Value >= appliedThreshold;
+        var outlierFloor = Math.Max(0d, appliedThreshold - MaxOutlierDrop);
+        var noExtremeOutlier = worstScore >= outlierFloor;
+
+        IReadOnlyList<EcgSession> impostorSessions;
+        if (cachedImpostorSessions is null)
+        {
+            impostorSessions = await LoadImpostorSessionsAsync(
+                userId,
+                ImpostorUsersToSample,
+                ImpostorSessionsPerUser,
+                ct,
+                IncludeAutoVerifySessionsInBaseline);
+        }
+        else
+        {
+            impostorSessions = cachedImpostorSessions;
+        }
+
+        var impostorScores = new List<double>(impostorSessions.Count);
+        foreach (var session in impostorSessions)
+        {
+            var pair = BuildPair(session, features, hrv ?? 0d);
+            var score = EvaluateScore(predictor, corrector, pair);
+            impostorScores.Add(score);
+        }
+
+        var orderedImpostorScores = impostorScores.OrderByDescending(s => s).ToList();
+        var impostorBestScore = orderedImpostorScores.Count > 0 ? orderedImpostorScores[0] : 0d;
+        var impostorTopK = Math.Min(ImpostorConsensusTopK, orderedImpostorScores.Count);
+        var impostorConsensusScore = impostorTopK > 0
+            ? orderedImpostorScores.Take(impostorTopK).Average()
+            : 0d;
+        var bestSeparation = bestScore - impostorBestScore;
+        var consensusSeparation = consensusScore - impostorConsensusScore;
+        var separationPasses = orderedImpostorScores.Count == 0 ||
+                               (bestSeparation >= MinimumGenuineImpostorMargin &&
+                                consensusSeparation >= MinimumGenuineImpostorMargin);
+
         var authenticated = latestPasses &&
                             bestScore >= appliedThreshold &&
-                            consensusScore >= appliedThreshold;
+                            consensusScore >= appliedThreshold &&
+                            medianScore >= appliedThreshold &&
+                            passRatio >= MinimumPassingRatio &&
+                            noExtremeOutlier &&
+                            separationPasses;
 
         ConfidenceSnapshot? confidence = null;
         try
@@ -512,9 +748,28 @@ public sealed class EcgAuthService : IEcgAuthService
             scores,
             consensusScore,
             passingVotes,
-            confidence);
+            confidence,
+            passRatio,
+            medianScore,
+            worstScore,
+            impostorBestScore,
+            impostorConsensusScore,
+            bestSeparation,
+            consensusSeparation);
 
-        return new VerificationSummary(result, consensusScore, passingVotes, appliedThreshold, latestScore, latestPasses, confidence);
+        return new VerificationSummary(
+            result,
+            consensusScore,
+            passingVotes,
+            appliedThreshold,
+            latestScore,
+            latestPasses,
+            confidence,
+            passRatio,
+            medianScore,
+            worstScore,
+            outlierFloor,
+            separationPasses);
     }
 
     private Task LogVerificationAttemptAsync(VerificationSummary summary, CancellationToken ct)
@@ -527,7 +782,16 @@ public sealed class EcgAuthService : IEcgAuthService
             ["threshold"] = summary.AppliedThreshold,
             ["meanScore"] = summary.MeanScore,
             ["votesPassing"] = summary.VotesPassing,
+            ["passRatio"] = summary.PassRatio,
+            ["medianScore"] = summary.MedianScore,
+            ["worstScore"] = summary.WorstScore,
+            ["outlierFloor"] = summary.OutlierFloor,
             ["consensusScore"] = summary.Result.ConsensusScore,
+            ["impostorBestScore"] = summary.Result.ImpostorBestScore,
+            ["impostorConsensusScore"] = summary.Result.ImpostorConsensusScore,
+            ["bestSeparation"] = summary.Result.BestSeparation,
+            ["consensusSeparation"] = summary.Result.ConsensusSeparation,
+            ["separationPasses"] = summary.SeparationPasses,
             ["latestScore"] = summary.LatestScore ?? 0d,
             ["latestPasses"] = summary.LatestPasses,
             ["authenticated"] = summary.Result.Authenticated,
@@ -538,7 +802,11 @@ public sealed class EcgAuthService : IEcgAuthService
         }, ct);
     }
 
-    private async Task<List<EcgSession>> LoadSessionsForUserAsync(string userId, int? limit = null, CancellationToken ct = default)
+    private async Task<List<EcgSession>> LoadSessionsForUserAsync(
+        string userId,
+        int? limit = null,
+        CancellationToken ct = default,
+        bool includeAutoVerify = true)
     {
         var snapshot = await _db.Collection("ecg_sessions")
             .WhereEqualTo("fitbitUserId", userId)
@@ -548,42 +816,13 @@ public sealed class EcgAuthService : IEcgAuthService
         foreach (var doc in snapshot.Documents)
         {
             var data = doc.ToDictionary();
-            var features = TryParseFeatures(data);
-            if (!EcgQualityRules.IsAcceptable(features))
+            if (!includeAutoVerify && HasTag(data, AutoVerifyTag))
                 continue;
-            var waveform = WaveformCompressor.Decompress(data.TryGetValue("waveformBlob", out var blobObj) ? blobObj?.ToString() : null);
-
-            sessions.Add(new EcgSession
-            {
-                FitbitUserId = userId,
-                HrvDailyRmssd = data.TryGetValue("hrvDailyRmssd", out var hrv) ? Convert.ToDouble(hrv) : 0d,
-                CollectedAtUtc = TryParseDateTimeOffset(data.TryGetValue("collectedAtUtc", out var collectedAtObj) ? collectedAtObj : null),
-                Mean = features.Mean,
-                Std = features.Std,
-                Rms = features.Rms,
-                Min = features.Min,
-                Max = features.Max,
-                Skewness = features.Skewness,
-                Kurtosis = features.Kurtosis,
-                EstimatedBpm = features.EstimatedBpm,
-                PeakCount = features.PeakCount,
-                RrMeanMs = features.RrMeanMs,
-                RrStdMs = features.RrStdMs,
-                QrsWidthMs = features.QrsWidthMs,
-                LowFreqPowerRatio = features.LowFreqPowerRatio,
-                MidFreqPowerRatio = features.MidFreqPowerRatio,
-                HighFreqPowerRatio = features.HighFreqPowerRatio,
-                SpectralCentroidHz = features.SpectralCentroidHz,
-                SpectralEntropy = features.SpectralEntropy,
-                VeryLowFreqPowerRatio = features.VeryLowFreqPowerRatio,
-                SignalQualityScore = features.SignalQualityScore,
-                MotionArtifactIndex = features.MotionArtifactIndex,
-                BaselineDriftRatio = features.BaselineDriftRatio,
-                Embedding = features.EmbeddingVector,
-                WaveformSamples = waveform,
-                SamplingHz = data.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 0,
-                ScalingFactor = data.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 0
-            });
+            if (IsKnownImpostorSession(data))
+                continue;
+            var session = TryMapSession(data, userId);
+            if (session is not null)
+                sessions.Add(session);
         }
 
         var ordered = sessions
@@ -596,6 +835,64 @@ public sealed class EcgAuthService : IEcgAuthService
         return ordered;
     }
 
+    private async Task<List<EcgSession>> LoadImpostorSessionsAsync(
+        string claimedUserId,
+        int maxUsers,
+        int maxSessionsPerUser,
+        CancellationToken ct = default,
+        bool includeAutoVerify = true)
+    {
+        if (maxUsers <= 0 || maxSessionsPerUser <= 0)
+            return new List<EcgSession>();
+
+        var snapshot = await _db.Collection("ecg_sessions").GetSnapshotAsync(ct);
+        var grouped = new Dictionary<string, List<EcgSession>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var doc in snapshot.Documents)
+        {
+            var data = doc.ToDictionary();
+            var rawUserId = data.TryGetValue("fitbitUserId", out var userObj) ? userObj?.ToString() : null;
+            if (string.IsNullOrWhiteSpace(rawUserId))
+                continue;
+
+            var userId = rawUserId.Trim();
+            var sameClaimedUser = string.Equals(userId, claimedUserId, StringComparison.OrdinalIgnoreCase);
+            var knownImpostorForClaimedUser = sameClaimedUser && IsKnownImpostorSession(data);
+            if (sameClaimedUser && !knownImpostorForClaimedUser)
+                continue;
+            if (!includeAutoVerify && HasTag(data, AutoVerifyTag))
+                continue;
+
+            var session = TryMapSession(data, userId);
+            if (session is null)
+                continue;
+
+            var bucketUserId = knownImpostorForClaimedUser ? $"{userId}#known-impostor" : userId;
+            if (!grouped.TryGetValue(bucketUserId, out var sessions))
+            {
+                sessions = new List<EcgSession>();
+                grouped[bucketUserId] = sessions;
+            }
+
+            sessions.Add(session);
+        }
+
+        return grouped
+            .Select(entry => new
+            {
+                UserId = entry.Key,
+                Sessions = entry.Value
+                    .OrderByDescending(s => s.CollectedAtUtc ?? DateTimeOffset.MinValue)
+                    .Take(maxSessionsPerUser)
+                    .ToList()
+            })
+            .OrderByDescending(entry => entry.Sessions.Count)
+            .ThenBy(entry => entry.UserId, StringComparer.OrdinalIgnoreCase)
+            .Take(maxUsers)
+            .SelectMany(entry => entry.Sessions)
+            .ToList();
+    }
+
     private sealed record VerificationSummary(
         VerifyResult Result,
         double MeanScore,
@@ -603,7 +900,76 @@ public sealed class EcgAuthService : IEcgAuthService
         double AppliedThreshold,
         double? LatestScore,
         bool LatestPasses,
-        ConfidenceSnapshot? Confidence);
+        ConfidenceSnapshot? Confidence,
+        double PassRatio,
+        double MedianScore,
+        double WorstScore,
+        double OutlierFloor,
+        bool SeparationPasses);
+
+    private static EcgSession? TryMapSession(Dictionary<string, object> data, string userId)
+    {
+        var features = TryParseFeatures(data);
+        if (!EcgQualityRules.IsAcceptable(features))
+            return null;
+
+        var waveform = WaveformCompressor.Decompress(data.TryGetValue("waveformBlob", out var blobObj) ? blobObj?.ToString() : null);
+        return new EcgSession
+        {
+            FitbitUserId = userId,
+            HrvDailyRmssd = data.TryGetValue("hrvDailyRmssd", out var hrv) ? Convert.ToDouble(hrv) : 0d,
+            CollectedAtUtc = TryParseDateTimeOffset(data.TryGetValue("collectedAtUtc", out var collectedAtObj) ? collectedAtObj : null),
+            Mean = features.Mean,
+            Std = features.Std,
+            Rms = features.Rms,
+            Min = features.Min,
+            Max = features.Max,
+            Skewness = features.Skewness,
+            Kurtosis = features.Kurtosis,
+            EstimatedBpm = features.EstimatedBpm,
+            PeakCount = features.PeakCount,
+            RrMeanMs = features.RrMeanMs,
+            RrStdMs = features.RrStdMs,
+            QrsWidthMs = features.QrsWidthMs,
+            LowFreqPowerRatio = features.LowFreqPowerRatio,
+            MidFreqPowerRatio = features.MidFreqPowerRatio,
+            HighFreqPowerRatio = features.HighFreqPowerRatio,
+            SpectralCentroidHz = features.SpectralCentroidHz,
+            SpectralEntropy = features.SpectralEntropy,
+            VeryLowFreqPowerRatio = features.VeryLowFreqPowerRatio,
+            SignalQualityScore = features.SignalQualityScore,
+            MotionArtifactIndex = features.MotionArtifactIndex,
+            BaselineDriftRatio = features.BaselineDriftRatio,
+            Embedding = features.EmbeddingVector,
+            WaveformSamples = waveform,
+            SamplingHz = data.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 0,
+            ScalingFactor = data.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 0
+        };
+    }
+
+    private static bool HasTag(Dictionary<string, object> payload, string tag)
+    {
+        var tags = TryParseStringList(payload, "tags");
+        return tags is not null && tags.Any(t => string.Equals(t, tag, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsKnownImpostorSession(Dictionary<string, object> payload)
+    {
+        return HasTag(payload, FalseAttemptTag) || HasTag(payload, ImpostorTag);
+    }
+
+    private static double ComputeMedian(IReadOnlyList<double> values)
+    {
+        if (values is null || values.Count == 0)
+            return 0d;
+
+        var ordered = values.OrderBy(v => v).ToList();
+        var mid = ordered.Count / 2;
+        if (ordered.Count % 2 == 0)
+            return (ordered[mid - 1] + ordered[mid]) / 2d;
+
+        return ordered[mid];
+    }
 
     private PredictionEngine<PairRow, PairPrediction> CreatePredictionEngine()
     {
@@ -931,6 +1297,7 @@ public sealed class EcgAuthService : IEcgAuthService
             Timestamp ts => ts.ToDateTime(),
             DateTimeOffset dto => dto,
             DateTime dt => DateTime.SpecifyKind(dt, DateTimeKind.Utc),
+            string text when DateTimeOffset.TryParse(text, out var parsed) => parsed,
             _ => null
         };
     }
@@ -1038,6 +1405,41 @@ public sealed class EcgAuthService : IEcgAuthService
             scalingFactor,
             tags,
             notes);
+    }
+
+    private static EcgCollectionOverview BuildCollectionOverview(string name, int count, DateTimeOffset? updatedAtUtc, string summary)
+        => new()
+        {
+            Name = name,
+            DocumentCount = count,
+            LastUpdatedUtc = updatedAtUtc,
+            Summary = summary
+        };
+
+    private static EcgVerificationLogPreview MapVerificationLog(DocumentSnapshot doc)
+    {
+        var payload = doc.ToDictionary();
+        return new EcgVerificationLogPreview
+        {
+            FitbitUserId = TryGetString(payload, "fitbitUserId") ?? string.Empty,
+            AttemptedAtUtc = TryParseDateTimeOffset(payload.TryGetValue("attemptedAtUtc", out var attemptedAt) ? attemptedAt : null),
+            Authenticated = payload.TryGetValue("authenticated", out var authenticated) && authenticated is not null && Convert.ToBoolean(authenticated),
+            Score = TryGetDouble(payload, "score") ?? 0d,
+            Threshold = TryGetDouble(payload, "threshold") ?? 0d,
+            ConfidenceLevel = TryGetDouble(payload, "confidenceLevel") ?? 0d
+        };
+    }
+
+    private static DateTimeOffset? ExtractLatestTimestamp(IEnumerable<DocumentSnapshot> documents, string fieldName)
+    {
+        return documents
+            .Select(doc =>
+            {
+                var payload = doc.ToDictionary();
+                return TryParseDateTimeOffset(payload.TryGetValue(fieldName, out var value) ? value : null);
+            })
+            .Where(value => value is not null)
+            .Max();
     }
 
 }

@@ -59,6 +59,21 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
     }
 
     [Fact]
+    public async Task CurrentUser_ReturnsConnectedFitbitProfile()
+    {
+        _service.Reset();
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/ecg-auth/current-user");
+        request.Headers.Add("X-Test-AccessToken", "token");
+
+        var response = await _client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.Contains("BTNYKG", payload);
+        Assert.Contains("Michel", payload);
+    }
+
+    [Fact]
     public async Task ContinuousVerify_UsesRequestPayload()
     {
         _service.Reset();
@@ -96,5 +111,36 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
         Assert.NotNull(_service.LastBenchmarkRequest);
         Assert.Equal(600, _service.LastBenchmarkRequest!.MaxPairsPerUser);
         Assert.Equal(0.4, _service.LastBenchmarkRequest.TestFraction);
+    }
+
+    [Fact]
+    public async Task DataOverview_ReturnsCollectionSummary()
+    {
+        _service.Reset();
+
+        var response = await _client.GetAsync("/api/ecg-auth/data-overview");
+
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.Contains("ecg_sessions", payload);
+        Assert.Contains("user-123", payload);
+    }
+
+    [Fact]
+    public async Task ReportFalseAttempt_ReturnsTaggedResponse()
+    {
+        _service.Reset();
+        var timestamp = DateTimeOffset.UtcNow;
+        var response = await _client.PostAsJsonAsync("/api/ecg-auth/report-false-attempt", new FalseAttemptReportRequest
+        {
+            FitbitUserId = "BTNYKG",
+            EcgStartTime = timestamp,
+            Notes = "known impostor"
+        });
+
+        response.EnsureSuccessStatusCode();
+        Assert.NotNull(_service.LastFalseAttemptRequest);
+        Assert.Equal("BTNYKG", _service.LastFalseAttemptRequest!.FitbitUserId);
+        Assert.Equal(timestamp, _service.LastFalseAttemptRequest.EcgStartTime);
     }
 }

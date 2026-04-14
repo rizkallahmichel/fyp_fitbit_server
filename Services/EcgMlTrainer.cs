@@ -40,6 +40,7 @@ public sealed class EcgSession
     public int[]? WaveformSamples { get; set; }
     public int SamplingHz { get; set; }
     public int ScalingFactor { get; set; }
+    public bool IsKnownImpostorForClaimedUser { get; set; }
 }
 
 public sealed class PairRow
@@ -127,6 +128,9 @@ public interface IEcgMlTrainer
 
 public sealed class EcgMlTrainer : IEcgMlTrainer
 {
+    private const string AutoVerifyTag = "auto-verify";
+    private const string FalseAttemptTag = "false-attempt";
+    private const string ImpostorTag = "impostor";
     private readonly FirestoreDb _db;
     private readonly IEcgFeatureExtractor _extractor;
     private readonly IEcgAugmentationService _augmentor;
@@ -323,6 +327,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             var payload = doc.ToDictionary();
             if (!payload.TryGetValue("fitbitUserId", out var userObj) || userObj is null)
                 continue;
+            if (HasTag(payload, AutoVerifyTag))
+                continue;
 
             var dataSource = EcgDataSource.Resolve(payload);
             if (!EcgDataSource.MatchesScope(scope, dataSource))
@@ -337,6 +343,7 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             var waveform = WaveformCompressor.Decompress(payload.TryGetValue("waveformBlob", out var blobObj) ? blobObj?.ToString() : null);
             var samplingHz = payload.TryGetValue("samplingFrequencyHz", out var samplingObj) ? Convert.ToInt32(samplingObj) : 0;
             var scalingFactor = payload.TryGetValue("scalingFactor", out var scalingObj) ? Convert.ToInt32(scalingObj) : 0;
+            var isKnownImpostor = HasTag(payload, FalseAttemptTag) || HasTag(payload, ImpostorTag);
 
             sessions.Add(ToSession(
                 userObj.ToString() ?? string.Empty,
@@ -345,10 +352,26 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
                 features,
                 waveform,
                 samplingHz,
-                scalingFactor));
+                scalingFactor,
+                isKnownImpostor));
         }
 
         return AugmentSessions(sessions);
+    }
+
+    private static bool HasTag(Dictionary<string, object> payload, string tag)
+    {
+        if (!payload.TryGetValue("tags", out var tagsObj) || tagsObj is not IEnumerable<object> rawTags)
+            return false;
+
+        foreach (var rawTag in rawTags)
+        {
+            var value = rawTag?.ToString();
+            if (!string.IsNullOrWhiteSpace(value) && string.Equals(value.Trim(), tag, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private static EcgFeatures ParseFeatures(Dictionary<string, object> dict)
@@ -396,7 +419,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         EcgFeatures features,
         int[]? waveform,
         int samplingHz,
-        int scalingFactor)
+        int scalingFactor,
+        bool isKnownImpostorForClaimedUser = false)
     {
         return new EcgSession
         {
@@ -427,7 +451,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             Embedding = features.EmbeddingVector,
             WaveformSamples = waveform,
             SamplingHz = samplingHz,
-            ScalingFactor = scalingFactor
+            ScalingFactor = scalingFactor,
+            IsKnownImpostorForClaimedUser = isKnownImpostorForClaimedUser
         };
     }
 
@@ -454,7 +479,15 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
                 if (!EcgQualityRules.IsAcceptable(features))
                     continue;
 
-                augmented.Add(ToSession(session.FitbitUserId, session.HrvDailyRmssd, session.CollectedAtUtc, features, variant, sampling, scaling));
+                augmented.Add(ToSession(
+                    session.FitbitUserId,
+                    session.HrvDailyRmssd,
+                    session.CollectedAtUtc,
+                    features,
+                    variant,
+                    sampling,
+                    scaling,
+                    session.IsKnownImpostorForClaimedUser));
             }
         }
 
@@ -474,18 +507,24 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
     }
     private static List<PairRow> BuildPairDataset(IReadOnlyList<EcgSession> sessions, int maxPairsPerUser)
     {
-        var grouped = sessions
+        var genuineByUser = sessions
+            .Where(s => !s.IsKnownImpostorForClaimedUser)
             .GroupBy(s => s.FitbitUserId)
             .Where(g => g.Count() >= 2)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.CollectedAtUtc ?? DateTimeOffset.MinValue).ToList());
 
-        if (grouped.Count < 2)
+        var hardNegativesByClaimedUser = sessions
+            .Where(s => s.IsKnownImpostorForClaimedUser)
+            .GroupBy(s => s.FitbitUserId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.CollectedAtUtc ?? DateTimeOffset.MinValue).ToList());
+
+        if (genuineByUser.Count < 2)
             throw new InvalidOperationException("Training requires sessions from at least two users.");
 
         var rng = new Random(42);
         var rows = new List<PairRow>();
 
-        foreach (var (userId, sameUserSessions) in grouped)
+        foreach (var (userId, sameUserSessions) in genuineByUser)
         {
             if (sameUserSessions.Count < 5)
                 continue;
@@ -500,8 +539,15 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
                 rows.Add(MakePair(a, b, true));
             }
 
-            var negatives = GenerateNegativePairs(userId, sameUserSessions, grouped, positiveTarget, rng);
+            var negatives = GenerateNegativePairs(userId, sameUserSessions, genuineByUser, positiveTarget, rng);
             rows.AddRange(negatives);
+
+            if (hardNegativesByClaimedUser.TryGetValue(userId, out var hardNegatives) && hardNegatives.Count > 0)
+            {
+                var hardTarget = Math.Max(positiveTarget, hardNegatives.Count);
+                var hardNegativePairs = GenerateHardNegativePairs(sameUserSessions, hardNegatives, hardTarget, rng);
+                rows.AddRange(hardNegativePairs);
+            }
         }
 
         return rows;
@@ -549,6 +595,30 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             var otherSessions = pool[rng.Next(pool.Count)];
             var other = otherSessions[rng.Next(otherSessions.Count)];
             yield return MakePair(anchor, other, false);
+            produced++;
+        }
+    }
+
+    private static IEnumerable<PairRow> GenerateHardNegativePairs(
+        IReadOnlyList<EcgSession> genuineSessions,
+        IReadOnlyList<EcgSession> hardNegativeSessions,
+        int target,
+        Random rng)
+    {
+        if (genuineSessions.Count == 0 || hardNegativeSessions.Count == 0 || target <= 0)
+            yield break;
+
+        var shuffledHardNegatives = hardNegativeSessions.ToList();
+        Shuffle(shuffledHardNegatives, rng);
+
+        var produced = 0;
+        var genuineIndex = 0;
+        while (produced < target)
+        {
+            var genuine = genuineSessions[genuineIndex % genuineSessions.Count];
+            genuineIndex++;
+            var impostor = shuffledHardNegatives[produced % shuffledHardNegatives.Count];
+            yield return MakePair(genuine, impostor, false);
             produced++;
         }
     }

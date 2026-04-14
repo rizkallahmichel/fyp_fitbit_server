@@ -103,6 +103,15 @@ def plot_roc(y_true: np.ndarray, probs: np.ndarray, out_path: Path) -> float:
     return roc_auc
 
 
+def compute_eer(y_true: np.ndarray, probs: np.ndarray) -> tuple[float, float]:
+    fpr, tpr, thresholds = roc_curve(y_true, probs)
+    fnr = 1.0 - tpr
+    idx = int(np.nanargmin(np.abs(fpr - fnr)))
+    eer = float((fpr[idx] + fnr[idx]) / 2.0)
+    threshold = float(thresholds[idx])
+    return eer, threshold
+
+
 def plot_distribution(
     y_true: np.ndarray, probs: np.ndarray, out_path: Path, threshold: float
 ) -> None:
@@ -178,6 +187,7 @@ def main() -> None:
     hist_path = output_dir / "score_distribution.png"
     auc_value = plot_roc(labels, probs, roc_path)
     plot_distribution(labels, probs, hist_path, args.threshold)
+    eer_value, eer_threshold = compute_eer(labels, probs)
 
     positives = labels.sum()
     negatives = len(labels) - positives
@@ -185,6 +195,7 @@ def main() -> None:
     tpr, fpr = _threshold_stats(labels, probs, threshold)
     print(f"Samples: {len(labels)} (pos={positives}, neg={negatives})")
     print(f"ROC AUC: {auc_value:0.4f}")
+    print(f"EER: {eer_value:0.4f} at threshold {eer_threshold:0.4f}")
     print(f"At threshold {threshold:.2f}: TPR={tpr:0.4f}  FPR={fpr:0.4f}")
     print(f"ROC plot   -> {roc_path}")
     print(f"Hist plot  -> {hist_path}")

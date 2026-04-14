@@ -11,8 +11,18 @@ public sealed class FakeEcgAuthService : IEcgAuthService
     public SessionCaptureRequest? LastCaptureRequest { get; private set; }
     public ContinuousVerifyRequest? LastContinuousRequest { get; private set; }
     public EcgBenchmarkRequest? LastBenchmarkRequest { get; private set; }
+    public FalseAttemptReportRequest? LastFalseAttemptRequest { get; private set; }
     public bool ThrowOnCollect { get; set; }
     public bool ThrowOnVerify { get; set; }
+
+    public Task<CurrentFitbitUserResponse> GetCurrentUserAsync(string accessToken, CancellationToken ct = default)
+    {
+        return Task.FromResult(new CurrentFitbitUserResponse
+        {
+            FitbitUserId = "BTNYKG",
+            DisplayName = "Michel"
+        });
+    }
 
     public Task<EcgSessionRecord> CollectSessionAsync(string accessToken, SessionCaptureRequest? request, CancellationToken ct = default)
     {
@@ -52,6 +62,66 @@ public sealed class FakeEcgAuthService : IEcgAuthService
         return Task.FromResult(sessions);
     }
 
+    public Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default)
+    {
+        var response = new EcgDataOverviewResponse
+        {
+            Collections =
+            {
+                new EcgCollectionOverview
+                {
+                    Name = "ecg_sessions",
+                    DocumentCount = 1,
+                    Summary = "1 known participant"
+                }
+            },
+            Participants =
+            {
+                new EcgParticipantOverview
+                {
+                    FitbitUserId = "user-123",
+                    SessionCount = 1,
+                    LastSessionAtUtc = DateTimeOffset.UtcNow
+                }
+            },
+            RecentSessions =
+            {
+                new EcgSessionPreview
+                {
+                    DocumentId = "session-1",
+                    FitbitUserId = "user-123",
+                    DataSource = "fitbit",
+                    EcgStartTimeUtc = DateTimeOffset.UtcNow,
+                    SignalQualityScore = 0.92,
+                    Tags = new List<string> { "baseline" }
+                }
+            },
+            RecentVerificationLogs =
+            {
+                new EcgVerificationLogPreview
+                {
+                    FitbitUserId = "user-123",
+                    AttemptedAtUtc = DateTimeOffset.UtcNow,
+                    Authenticated = true,
+                    Score = 0.91,
+                    Threshold = 0.85,
+                    ConfidenceLevel = 0.92
+                }
+            },
+            ModelState = new EcgModelStateOverview
+            {
+                SessionCount = 1,
+                SessionCountAtLastTrain = 1,
+                RetrainPending = false,
+                LastAccuracy = 0.9,
+                LastAreaUnderRocCurve = 0.91,
+                LastF1Score = 0.89
+            }
+        };
+
+        return Task.FromResult(response);
+    }
+
     public Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default)
     {
         LastBenchmarkRequest = request;
@@ -67,11 +137,26 @@ public sealed class FakeEcgAuthService : IEcgAuthService
         return Task.FromResult(response);
     }
 
+    public Task<FalseAttemptReportResponse> ReportFalseAttemptAsync(FalseAttemptReportRequest request, CancellationToken ct = default)
+    {
+        LastFalseAttemptRequest = request;
+        var response = new FalseAttemptReportResponse
+        {
+            FitbitUserId = request.FitbitUserId,
+            EcgStartTime = request.EcgStartTime,
+            SessionDocumentId = "session-1",
+            Tags = new[] { "false-attempt", "impostor" },
+            RetrainRequested = true
+        };
+        return Task.FromResult(response);
+    }
+
     public void Reset()
     {
         LastCaptureRequest = null;
         LastContinuousRequest = null;
         LastBenchmarkRequest = null;
+        LastFalseAttemptRequest = null;
         ThrowOnCollect = false;
         ThrowOnVerify = false;
     }
