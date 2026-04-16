@@ -21,11 +21,14 @@
 
   <ItemGroup>
     <Compile Remove="Tests\**\*.cs" />
+    <Compile Remove="TestArtifacts\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <None Remove="Tests\**\*" />
+    <None Remove="TestArtifacts\**\*" />
     <Content Remove="Tests\**\*" />
+    <Content Remove="TestArtifacts\**\*" />
   </ItemGroup>
 
 </Project>

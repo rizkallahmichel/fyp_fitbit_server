@@ -95,6 +95,13 @@ public sealed class EcgAuthController : ControllerBase
         return Ok(sessions);
     }
 
+    [HttpGet("logs")]
+    public async Task<IActionResult> GetLogs([FromQuery] string? fitbitUserId = null, [FromQuery] int limit = 100, CancellationToken ct = default)
+    {
+        var logs = await _authService.GetVerificationLogsAsync(fitbitUserId, limit, ct);
+        return Ok(logs);
+    }
+
     [HttpGet("data-overview")]
     public async Task<IActionResult> GetDataOverview(CancellationToken ct)
     {
