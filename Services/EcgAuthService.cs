@@ -56,6 +56,7 @@ public interface IEcgAuthService
     Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default);
     Task<FalseAttemptReportResponse> ReportFalseAttemptAsync(FalseAttemptReportRequest request, CancellationToken ct = default);
     Task<IReadOnlyList<EcgSessionRecord>> GetSessionsAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<VerificationLogRecord>> GetVerificationLogsAsync(string? fitbitUserId = null, int limit = 100, CancellationToken ct = default);
     Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default);
     Task<EcgBenchmarkResponse> BenchmarkEcgIdAsync(EcgBenchmarkRequest request, CancellationToken ct = default);
 }
@@ -160,6 +161,22 @@ public sealed class EcgAuthService : IEcgAuthService
             sessions.Add(ToSessionRecord(doc));
 
         return sessions;
+    }
+
+    public async Task<IReadOnlyList<VerificationLogRecord>> GetVerificationLogsAsync(string? fitbitUserId = null, int limit = 100, CancellationToken ct = default)
+    {
+        var normalizedUserId = string.IsNullOrWhiteSpace(fitbitUserId) ? null : fitbitUserId.Trim();
+        var cappedLimit = Math.Clamp(limit, 1, 500);
+        var snapshot = await _db.Collection("ecg_auth_logs").GetSnapshotAsync(ct);
+
+        var logs = snapshot.Documents
+            .Select(MapVerificationLogRecord)
+            .Where(log => normalizedUserId is null || string.Equals(log.FitbitUserId, normalizedUserId, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(log => log.AttemptedAtUtc ?? DateTimeOffset.MinValue)
+            .Take(cappedLimit)
+            .ToList();
+
+        return logs;
     }
 
     public async Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default)
@@ -1427,6 +1444,30 @@ public sealed class EcgAuthService : IEcgAuthService
             Score = TryGetDouble(payload, "score") ?? 0d,
             Threshold = TryGetDouble(payload, "threshold") ?? 0d,
             ConfidenceLevel = TryGetDouble(payload, "confidenceLevel") ?? 0d
+        };
+    }
+
+    private static VerificationLogRecord MapVerificationLogRecord(DocumentSnapshot doc)
+    {
+        var payload = doc.ToDictionary();
+        return new VerificationLogRecord
+        {
+            Id = doc.Id,
+            FitbitUserId = TryGetString(payload, "fitbitUserId") ?? string.Empty,
+            Alias = TryGetString(payload, "alias"),
+            AttemptedAtUtc = TryParseDateTimeOffset(payload.TryGetValue("attemptedAtUtc", out var attemptedAt) ? attemptedAt : null),
+            EcgStartTimeUtc = TryParseDateTimeOffset(payload.TryGetValue("ecgStartTimeUtc", out var ecgStartAt) ? ecgStartAt : null),
+            Score = TryGetDouble(payload, "score") ?? 0d,
+            Threshold = TryGetDouble(payload, "threshold") ?? 0d,
+            Authenticated = payload.TryGetValue("authenticated", out var authenticated) && authenticated is not null && Convert.ToBoolean(authenticated),
+            ConsensusScore = TryGetDouble(payload, "consensusScore") ?? 0d,
+            VotesPassing = Convert.ToInt32(TryGetDouble(payload, "votesPassing") ?? 0d),
+            ComparisonCount = Convert.ToInt32(TryGetDouble(payload, "comparisonCount") ?? 0d),
+            ConfidenceLevel = TryGetDouble(payload, "confidenceLevel") ?? 0d,
+            ConfidenceDrift = TryGetDouble(payload, "confidenceDrift") ?? 0d,
+            ConfidenceSamples = Convert.ToInt32(TryGetDouble(payload, "confidenceSamples") ?? 0d),
+            Label = TryGetString(payload, "label"),
+            Notes = TryGetString(payload, "notes")
         };
     }
 
