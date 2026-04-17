@@ -77,6 +77,7 @@ public sealed class EcgAuthService : IEcgAuthService
     private const bool EnableAutoVerifyEnrollment = false;
     private const string AutoVerifyTag = "auto-verify";
     private const string AutoVerifyNote = "Captured automatically after successful /verify.";
+    private const string VerifyAttemptTag = "verify-attempt";
     private const string FalseAttemptTag = "false-attempt";
     private const string ImpostorTag = "impostor";
     private readonly IFitbitEcgService _fitbit;
@@ -98,6 +99,10 @@ public sealed class EcgAuthService : IEcgAuthService
     private readonly object _correctionLock = new();
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly bool _bypassFitbit;
+    private readonly string? _primaryFitbitUserId;
+    private readonly bool _enrollVerifyAttempts;
+    private readonly bool _treatNonPrimaryAsImpostor;
+    private readonly bool _rewriteFailedVerifyToImpostorUser;
 
     public EcgAuthService(
         IFitbitEcgService fitbit,
@@ -122,6 +127,12 @@ public sealed class EcgAuthService : IEcgAuthService
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _bypassFitbit = configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
+        _primaryFitbitUserId = configuration["EcgAuth:PrimaryFitbitUserId"]?.Trim();
+        if (string.IsNullOrWhiteSpace(_primaryFitbitUserId))
+            _primaryFitbitUserId = null;
+        _enrollVerifyAttempts = configuration.GetValue("EcgAuth:EnableVerifyAttemptEnrollment", true);
+        _treatNonPrimaryAsImpostor = configuration.GetValue("EcgAuth:TreatNonPrimaryAsImpostor", true);
+        _rewriteFailedVerifyToImpostorUser = configuration.GetValue("EcgAuth:RewriteFailedVerifyToImpostorUser", true);
         Console.WriteLine($"[EcgAuthService] Fitbit bypass mode: {_bypassFitbit}");
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
@@ -292,23 +303,28 @@ public sealed class EcgAuthService : IEcgAuthService
 
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
     {
-        var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
+        var currentUserId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
+        var claimedUserId = ResolveClaimedUserId(currentUserId);
+        var nonPrimaryAttempt = _primaryFitbitUserId is not null &&
+                                !string.Equals(currentUserId, claimedUserId, StringComparison.OrdinalIgnoreCase);
+        var operatorMarkedImpostor = IsOperatorMarkedImpostor();
+
         var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
+        var baselineSessions = await LoadSessionsForUserAsync(claimedUserId, limit, ct, IncludeAutoVerifySessionsInBaseline);
         if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
-            baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, includeAutoVerify: true);
+            baselineSessions = await LoadSessionsForUserAsync(claimedUserId, limit, ct, includeAutoVerify: true);
         if (baselineSessions.Count == 0)
             throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
         if (baselineSessions.Count < MinimumBaselineSessions)
             throw new InvalidOperationException($"At least {MinimumBaselineSessions} ECG enrollment sessions are required for reliable verification.");
 
-        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
+        var impostorSessions = await LoadImpostorSessionsAsync(claimedUserId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
 
         var attempt = await CaptureSessionAsync(accessToken, ct);
         var attemptFeatures = attempt.Features;
 
         var summary = await ScoreAttemptAsync(
-            userId,
+            claimedUserId,
             attemptFeatures,
             attempt.Reading.StartTime,
             attempt.Hrv,
@@ -317,13 +333,45 @@ public sealed class EcgAuthService : IEcgAuthService
             baselineSessions,
             impostorSessions);
 
-        await LogVerificationAttemptAsync(summary, ct);
+        var shouldTreatAsImpostor = operatorMarkedImpostor || (_treatNonPrimaryAsImpostor && nonPrimaryAttempt);
+        var result = shouldTreatAsImpostor && summary.Result.Authenticated
+            ? summary.Result with { Authenticated = false }
+            : summary.Result;
+        var effectiveSummary = shouldTreatAsImpostor && summary.Result.Authenticated
+            ? summary with { Result = result }
+            : summary;
 
-        if (summary.Result.Authenticated &&
+        await LogVerificationAttemptAsync(effectiveSummary, ct);
+
+        if (_enrollVerifyAttempts)
+        {
+            var tags = new List<string> { VerifyAttemptTag };
+            string? notes = null;
+            string? userIdOverride = null;
+            var markImpostor = shouldTreatAsImpostor || (_rewriteFailedVerifyToImpostorUser && !result.Authenticated);
+            if (markImpostor)
+            {
+                tags.Add(FalseAttemptTag);
+                tags.Add(ImpostorTag);
+                userIdOverride = BuildImpostorUserId(claimedUserId, currentUserId, nonPrimaryAttempt);
+                notes = $"Captured from user {currentUserId} during /verify and stored as impostor sample for claimed user {claimedUserId} under {userIdOverride}.";
+            }
+
+            await PersistSessionAsync(
+                attempt,
+                null,
+                tags,
+                notes,
+                EcgDataSource.Fitbit,
+                ct,
+                userIdOverride);
+        }
+
+        if (result.Authenticated &&
             EnableAutoVerifyEnrollment &&
-            summary.Result.PassRatio >= 0.98 &&
-            summary.Result.BestSeparation >= 0.1 &&
-            summary.Result.ConsensusSeparation >= 0.1)
+            result.PassRatio >= 0.98 &&
+            result.BestSeparation >= 0.1 &&
+            result.ConsensusSeparation >= 0.1)
         {
             await PersistSessionAsync(
                 attempt,
@@ -333,7 +381,44 @@ public sealed class EcgAuthService : IEcgAuthService
                 EcgDataSource.Fitbit,
                 ct);
         }
-        return summary.Result;
+        return result;
+    }
+
+    private string ResolveClaimedUserId(string currentUserId)
+    {
+        var httpContext = _httpContextAccessor?.HttpContext;
+        if (httpContext?.Request.Headers.TryGetValue("X-Claimed-Fitbit-UserId", out var claimedHeader) == true)
+        {
+            var headerValue = claimedHeader.ToString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(headerValue))
+                return headerValue;
+        }
+
+        return _primaryFitbitUserId ?? currentUserId;
+    }
+
+    private bool IsOperatorMarkedImpostor()
+    {
+        var httpContext = _httpContextAccessor?.HttpContext;
+        if (httpContext?.Request.Headers.TryGetValue("X-Impostor-Attempt", out var impostorHeader) == true)
+        {
+            var raw = impostorHeader.ToString()?.Trim();
+            return string.Equals(raw, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(raw, "yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
+    }
+
+    private static string BuildImpostorUserId(string claimedUserId, string currentUserId, bool nonPrimaryAttempt)
+    {
+        var claimed = string.IsNullOrWhiteSpace(claimedUserId) ? "unknown" : claimedUserId.Trim();
+        if (nonPrimaryAttempt && !string.IsNullOrWhiteSpace(currentUserId) &&
+            !string.Equals(claimedUserId, currentUserId, StringComparison.OrdinalIgnoreCase))
+            return $"{claimed}#impostor#{currentUserId.Trim()}";
+
+        return $"{claimed}#impostor";
     }
 
     public async Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default)
@@ -579,11 +664,13 @@ public sealed class EcgAuthService : IEcgAuthService
         IReadOnlyCollection<string>? tags,
         string? notes,
         string dataSource,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? userIdOverride = null)
     {
+        var persistedUserId = string.IsNullOrWhiteSpace(userIdOverride) ? capture.UserId : userIdOverride.Trim();
         if (capture.Reading.StartTime is DateTimeOffset startTime)
         {
-            var existing = await TryGetExistingSessionAsync(capture.UserId, startTime, ct);
+            var existing = await TryGetExistingSessionAsync(persistedUserId, startTime, ct);
             if (existing is not null)
                 return existing;
         }
@@ -597,7 +684,7 @@ public sealed class EcgAuthService : IEcgAuthService
 
         var payload = new Dictionary<string, object>
         {
-            ["fitbitUserId"] = capture.UserId,
+            ["fitbitUserId"] = persistedUserId,
             ["dataSource"] = dataSource,
             ["sessionTimeUtc"] = Timestamp.FromDateTime(collectedAtUtc),
             ["collectedAtUtc"] = Timestamp.FromDateTime(collectedAtUtc),
@@ -622,7 +709,7 @@ public sealed class EcgAuthService : IEcgAuthService
 
         return new EcgSessionRecord(
             docRef.Id,
-            capture.UserId,
+            persistedUserId,
             dataSource,
             capture.Reading.StartTime,
             capture.Hrv,

@@ -22,13 +22,19 @@
   <ItemGroup>
     <Compile Remove="Tests\**\*.cs" />
     <Compile Remove="TestArtifacts\**\*.cs" />
+    <Compile Remove="obj-test\**\*.cs" />
+    <Compile Remove="bin-test\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <None Remove="Tests\**\*" />
     <None Remove="TestArtifacts\**\*" />
+    <None Remove="obj-test\**\*" />
+    <None Remove="bin-test\**\*" />
     <Content Remove="Tests\**\*" />
     <Content Remove="TestArtifacts\**\*" />
+    <Content Remove="obj-test\**\*" />
+    <Content Remove="bin-test\**\*" />
   </ItemGroup>
 
 </Project>

@@ -8,6 +8,7 @@ namespace FitServer.Tests.Infrastructure;
 
 public sealed class FakeEcgAuthService : IEcgAuthService
 {
+    private readonly List<VerificationLogRecord> _logs = new();
     public SessionCaptureRequest? LastCaptureRequest { get; private set; }
     public ContinuousVerifyRequest? LastContinuousRequest { get; private set; }
     public EcgBenchmarkRequest? LastBenchmarkRequest { get; private set; }
@@ -60,6 +61,20 @@ public sealed class FakeEcgAuthService : IEcgAuthService
             TestDataFactory.CreateSessionRecord()
         };
         return Task.FromResult(sessions);
+    }
+
+    public Task<IReadOnlyList<VerificationLogRecord>> GetVerificationLogsAsync(string? fitbitUserId = null, int limit = 100, CancellationToken ct = default)
+    {
+        var query = _logs.AsEnumerable();
+        if (!string.IsNullOrWhiteSpace(fitbitUserId))
+            query = query.Where(log => string.Equals(log.FitbitUserId, fitbitUserId.Trim(), StringComparison.OrdinalIgnoreCase));
+
+        var cappedLimit = Math.Clamp(limit, 1, 500);
+        IReadOnlyList<VerificationLogRecord> result = query
+            .OrderByDescending(log => log.AttemptedAtUtc ?? DateTimeOffset.MinValue)
+            .Take(cappedLimit)
+            .ToList();
+        return Task.FromResult(result);
     }
 
     public Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default)

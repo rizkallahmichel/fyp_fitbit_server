@@ -1,0 +1,9 @@
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.csproj.AssemblyReference.cache
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\rpswa.dswa.cache.json
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.GeneratedMSBuildEditorConfig.editorconfig
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.AssemblyInfoInputs.cache
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.AssemblyInfo.cs
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.csproj.CoreCompileInputs.cache
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.MvcApplicationPartsAssemblyInfo.cs
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.MvcApplicationPartsAssemblyInfo.cache
+D:\CATHO\these\fyp_fitbit_server\obj-test\Debug\net9.0\FitServer.sourcelink.json
