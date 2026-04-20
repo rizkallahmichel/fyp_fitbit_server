@@ -77,6 +77,11 @@ public sealed class EcgAuthService : IEcgAuthService
     private const bool EnableAutoVerifyEnrollment = false;
     private const string AutoVerifyTag = "auto-verify";
     private const string AutoVerifyNote = "Captured automatically after successful /verify.";
+    private const string EnrollmentTag = "enrollment";
+    private const string GenuineTag = "genuine";
+    private const string VerifyAttemptTag = "verify-attempt";
+    private const string GenuineAttemptTag = "genuine-attempt";
+    private const string ImpostorAttemptTag = "impostor-attempt";
     private const string FalseAttemptTag = "false-attempt";
     private const string ImpostorTag = "impostor";
     private readonly IFitbitEcgService _fitbit;
@@ -134,6 +139,8 @@ public sealed class EcgAuthService : IEcgAuthService
             .Select(t => t.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList() ?? new List<string>();
+        tags.Add(EnrollmentTag);
+        tags.Add(GenuineTag);
 
         return await PersistSessionAsync(
             capture,
@@ -293,6 +300,7 @@ public sealed class EcgAuthService : IEcgAuthService
     public async Task<VerifyResult> VerifyAsync(string accessToken, double threshold, CancellationToken ct = default)
     {
         var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
+        var operatorMarkedImpostor = IsOperatorMarkedImpostor();
         var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
         var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
         if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
@@ -316,14 +324,43 @@ public sealed class EcgAuthService : IEcgAuthService
             ct,
             baselineSessions,
             impostorSessions);
+        var shouldMarkAsImpostor = operatorMarkedImpostor || !summary.Result.Authenticated;
+        var result = shouldMarkAsImpostor && summary.Result.Authenticated
+            ? summary.Result with { Authenticated = false }
+            : summary.Result;
+        var effectiveSummary = shouldMarkAsImpostor && summary.Result.Authenticated
+            ? summary with { Result = result }
+            : summary;
 
-        await LogVerificationAttemptAsync(summary, ct);
+        await LogVerificationAttemptAsync(effectiveSummary, ct);
 
-        if (summary.Result.Authenticated &&
+        var verifyTags = new List<string> { VerifyAttemptTag };
+        if (shouldMarkAsImpostor)
+        {
+            verifyTags.Add(ImpostorAttemptTag);
+            verifyTags.Add(FalseAttemptTag);
+            verifyTags.Add(ImpostorTag);
+        }
+        else
+        {
+            verifyTags.Add(GenuineAttemptTag);
+        }
+
+        await PersistSessionAsync(
+            attempt,
+            null,
+            verifyTags,
+            shouldMarkAsImpostor
+                ? "Automatically stored from /verify as impostor/failed attempt."
+                : "Automatically stored from /verify as genuine attempt.",
+            EcgDataSource.Fitbit,
+            ct);
+
+        if (result.Authenticated &&
             EnableAutoVerifyEnrollment &&
-            summary.Result.PassRatio >= 0.98 &&
-            summary.Result.BestSeparation >= 0.1 &&
-            summary.Result.ConsensusSeparation >= 0.1)
+            result.PassRatio >= 0.98 &&
+            result.BestSeparation >= 0.1 &&
+            result.ConsensusSeparation >= 0.1)
         {
             await PersistSessionAsync(
                 attempt,
@@ -333,79 +370,26 @@ public sealed class EcgAuthService : IEcgAuthService
                 EcgDataSource.Fitbit,
                 ct);
         }
-        return summary.Result;
+        return result;
     }
 
     public async Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default)
     {
-        var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
-        var threshold = request.Threshold is > 0 ? request.Threshold.Value : DefaultThreshold;
-        var windowMinutes = Math.Clamp(request.WindowMinutes, 5, 120);
-        var strideMinutes = Math.Clamp(request.StrideMinutes, 1, windowMinutes);
-        var slices = Math.Max(1, (int)Math.Ceiling(windowMinutes / (double)strideMinutes));
-        var perRequestLimit = Math.Min(20, slices + 1);
-        var baselineLimit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-        var baselineSessions = await LoadSessionsForUserAsync(userId, baselineLimit, ct, IncludeAutoVerifySessionsInBaseline);
-        if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
-            baselineSessions = await LoadSessionsForUserAsync(userId, baselineLimit, ct, includeAutoVerify: true);
-        if (baselineSessions.Count == 0)
-            throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
-        if (baselineSessions.Count < MinimumBaselineSessions)
-            throw new InvalidOperationException($"At least {MinimumBaselineSessions} ECG enrollment sessions are required for reliable verification.");
+        throw new InvalidOperationException("continuous-verify is disabled. Use collect-session and verify workflow only.");
+    }
 
-        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
-
-        var hrv = await _fitbit.GetDailyHrvAsync(accessToken, DateOnly.FromDateTime(DateTime.UtcNow), ct);
-        var readings = await _fitbit.GetRecentEcgsAsync(accessToken, perRequestLimit, DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), ct);
-        if (readings.Count == 0)
-            throw new InvalidOperationException("No ECG waveform found. Ask the user to run an ECG recording on the watch.");
-
-        var samples = new List<ContinuousVerifySample>();
-        var scores = new List<double>();
-        foreach (var reading in readings.OrderBy(r => r.StartTime ?? DateTimeOffset.MinValue))
+    private bool IsOperatorMarkedImpostor()
+    {
+        var httpContext = _httpContextAccessor?.HttpContext;
+        if (httpContext?.Request.Headers.TryGetValue("X-Impostor-Attempt", out var impostorHeader) == true)
         {
-            if (reading?.WaveFormSamples == null || reading.WaveFormSamples.Count == 0)
-                continue;
-
-            var scalingFactor = reading.ScalingFactor is > 0 ? reading.ScalingFactor.Value : 10922;
-            var samplingHz = reading.SamplingFrequencyHz is > 0 ? reading.SamplingFrequencyHz.Value : 250;
-            var features = _extractor.Extract(reading.WaveFormSamples, scalingFactor, samplingHz);
-            var embedding = _embedding.GenerateEmbedding(reading.WaveFormSamples, scalingFactor, samplingHz);
-            if (embedding is { Length: > 0 })
-                features = features with { EmbeddingVector = embedding };
-            EcgQualityRules.EnsureAcceptable(features);
-
-            var summary = await ScoreAttemptAsync(
-                userId,
-                features,
-                reading.StartTime,
-                hrv,
-                threshold,
-                ct,
-                baselineSessions,
-                impostorSessions);
-
-            await LogVerificationAttemptAsync(summary, ct);
-            samples.Add(new ContinuousVerifySample
-            {
-                WindowStartUtc = reading.StartTime ?? DateTimeOffset.UtcNow,
-                WindowEndUtc = (reading.StartTime ?? DateTimeOffset.UtcNow).AddMinutes(strideMinutes),
-                Score = summary.Result.Score,
-                Passes = summary.Result.Authenticated
-            });
-            scores.Add(summary.Result.Score);
+            var raw = impostorHeader.ToString()?.Trim();
+            return string.Equals(raw, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(raw, "yes", StringComparison.OrdinalIgnoreCase);
         }
 
-        if (samples.Count == 0)
-            throw new InvalidOperationException("Unable to evaluate ECG stream. Ensure new Fitbit ECG traces are available.");
-
-        return new ContinuousVerifyResponse
-        {
-            Authenticated = samples.Count > 0 && samples.All(s => s.Passes),
-            RollingMeanScore = scores.Average(),
-            RollingWorstScore = scores.Min(),
-            Samples = samples
-        };
+        return false;
     }
 
     public async Task<FalseAttemptReportResponse> ReportFalseAttemptAsync(FalseAttemptReportRequest request, CancellationToken ct = default)

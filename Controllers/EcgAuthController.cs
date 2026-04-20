@@ -79,13 +79,8 @@ public sealed class EcgAuthController : ControllerBase
     [HttpPost("continuous-verify")]
     public async Task<IActionResult> ContinuousVerify([FromBody] ContinuousVerifyRequest? request, CancellationToken ct = default)
     {
-        var accessToken = HttpContext.Items["AccessToken"] as string;
-        if (string.IsNullOrWhiteSpace(accessToken))
-            return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
-
-        var payload = request ?? new ContinuousVerifyRequest();
-        var response = await _authService.VerifyContinuouslyAsync(accessToken, payload, ct);
-        return Ok(response);
+        await Task.CompletedTask;
+        return StatusCode(StatusCodes.Status410Gone, "continuous-verify has been removed from the workflow. Use collect-session then verify.");
     }
 
     [HttpGet("sessions")]

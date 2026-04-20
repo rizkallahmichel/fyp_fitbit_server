@@ -74,7 +74,7 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
     }
 
     [Fact]
-    public async Task ContinuousVerify_UsesRequestPayload()
+    public async Task ContinuousVerify_ReturnsGone()
     {
         _service.Reset();
         var request = new HttpRequestMessage(HttpMethod.Post, "/api/ecg-auth/continuous-verify")
@@ -90,11 +90,7 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
 
         var response = await _client.SendAsync(request);
 
-        response.EnsureSuccessStatusCode();
-        Assert.NotNull(_service.LastContinuousRequest);
-        Assert.Equal(20, _service.LastContinuousRequest!.WindowMinutes);
-        Assert.Equal(10, _service.LastContinuousRequest.StrideMinutes);
-        Assert.Equal(0.8, _service.LastContinuousRequest.Threshold);
+        Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
     }
 
     [Fact]
