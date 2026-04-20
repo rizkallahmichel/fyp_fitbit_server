@@ -20,6 +20,12 @@ public class FitbitAuthMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        if (TryUseRequestBearerToken(context))
+        {
+            await _next(context);
+            return;
+        }
+
         if (string.IsNullOrEmpty(_accessToken) || !await IsTokenValid(_accessToken))
         {
             if (!string.IsNullOrEmpty(_refreshToken))
@@ -38,6 +44,23 @@ public class FitbitAuthMiddleware
 
         context.Items["AccessToken"] = _accessToken;
         await _next(context);
+    }
+
+    private static bool TryUseRequestBearerToken(HttpContext context)
+    {
+        if (!context.Request.Headers.TryGetValue("Authorization", out var authHeader))
+            return false;
+
+        var raw = authHeader.ToString();
+        if (string.IsNullOrWhiteSpace(raw) || !raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var token = raw["Bearer ".Length..].Trim();
+        if (string.IsNullOrWhiteSpace(token))
+            return false;
+
+        context.Items["AccessToken"] = token;
+        return true;
     }
 
     private async Task<bool> IsTokenValid(string token)

@@ -83,9 +83,16 @@ public sealed class EcgAuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(accessToken))
             return Unauthorized("No access token found. FitbitAuthMiddleware must run before this endpoint.");
 
-        var payload = request ?? new ContinuousVerifyRequest();
-        var response = await _authService.VerifyContinuouslyAsync(accessToken, payload, ct);
-        return Ok(response);
+        try
+        {
+            var payload = request ?? new ContinuousVerifyRequest();
+            var response = await _authService.VerifyContinuouslyAsync(accessToken, payload, ct);
+            return Ok(response);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 
     [HttpGet("sessions")]

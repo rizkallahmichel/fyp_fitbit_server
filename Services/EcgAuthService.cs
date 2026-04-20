@@ -63,7 +63,7 @@ public interface IEcgAuthService
 
 public sealed class EcgAuthService : IEcgAuthService
 {
-    private const double DefaultThreshold = 0.85;
+    private const double DefaultThreshold = 0.95;
     private const int VerificationBaselineCount = 0;
     private const int ScoreConsensusTopK = 3;
     private const int ImpostorConsensusTopK = 3;
@@ -73,6 +73,9 @@ public sealed class EcgAuthService : IEcgAuthService
     private const double MinimumPassingRatio = 0.9;
     private const double MaxOutlierDrop = 0.15;
     private const double MinimumGenuineImpostorMargin = 0.03;
+    private const double ImpostorScoreThreshold = 0.7;
+    private const double MinimumSeparationRatio = 1.2;
+    private const double MinimumConsensusSeparation = 0.03;
     private const bool IncludeAutoVerifySessionsInBaseline = false;
     private const bool EnableAutoVerifyEnrollment = false;
     private const string AutoVerifyTag = "auto-verify";
@@ -103,6 +106,13 @@ public sealed class EcgAuthService : IEcgAuthService
     private readonly bool _enrollVerifyAttempts;
     private readonly bool _treatNonPrimaryAsImpostor;
     private readonly bool _rewriteFailedVerifyToImpostorUser;
+    private readonly bool _requireSeparation;
+    private readonly bool _allowRelaxedSeparationOverride;
+    private readonly double _defaultThreshold;
+    private readonly bool _scoreCalibrationEnabled;
+    private readonly double _calibrationTemperature;
+    private readonly double _impostorZNormWeight;
+    private readonly double _impostorStdFloor;
 
     public EcgAuthService(
         IFitbitEcgService fitbit,
@@ -133,6 +143,13 @@ public sealed class EcgAuthService : IEcgAuthService
         _enrollVerifyAttempts = configuration.GetValue("EcgAuth:EnableVerifyAttemptEnrollment", true);
         _treatNonPrimaryAsImpostor = configuration.GetValue("EcgAuth:TreatNonPrimaryAsImpostor", true);
         _rewriteFailedVerifyToImpostorUser = configuration.GetValue("EcgAuth:RewriteFailedVerifyToImpostorUser", true);
+        _requireSeparation = configuration.GetValue("EcgAuth:RequireSeparation", true);
+        _allowRelaxedSeparationOverride = configuration.GetValue("EcgAuth:AllowRelaxedSeparationOverride", false);
+        _defaultThreshold = Math.Clamp(configuration.GetValue("EcgAuth:DefaultThreshold", DefaultThreshold), 0d, 1d);
+        _scoreCalibrationEnabled = configuration.GetValue("EcgAuth:ScoreCalibrationEnabled", true);
+        _calibrationTemperature = Math.Clamp(configuration.GetValue("EcgAuth:CalibrationTemperature", 3.0), 1.0, 10.0);
+        _impostorZNormWeight = Math.Clamp(configuration.GetValue("EcgAuth:ImpostorZNormWeight", 0.5), 0.0, 1.0);
+        _impostorStdFloor = Math.Clamp(configuration.GetValue("EcgAuth:ImpostorStdFloor", 0.02), 0.001, 0.5);
         Console.WriteLine($"[EcgAuthService] Fitbit bypass mode: {_bypassFitbit}");
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
@@ -322,6 +339,7 @@ public sealed class EcgAuthService : IEcgAuthService
 
         var attempt = await CaptureSessionAsync(accessToken, ct);
         var attemptFeatures = attempt.Features;
+        var requireSeparation = ResolveRequireSeparation();
 
         var summary = await ScoreAttemptAsync(
             claimedUserId,
@@ -329,6 +347,7 @@ public sealed class EcgAuthService : IEcgAuthService
             attempt.Reading.StartTime,
             attempt.Hrv,
             threshold,
+            requireSeparation,
             ct,
             baselineSessions,
             impostorSessions);
@@ -424,7 +443,8 @@ public sealed class EcgAuthService : IEcgAuthService
     public async Task<ContinuousVerifyResponse> VerifyContinuouslyAsync(string accessToken, ContinuousVerifyRequest request, CancellationToken ct = default)
     {
         var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
-        var threshold = request.Threshold is > 0 ? request.Threshold.Value : DefaultThreshold;
+        var threshold = request.Threshold is > 0 ? request.Threshold.Value : _defaultThreshold;
+        var requireSeparation = ResolveRequireSeparation();
         var windowMinutes = Math.Clamp(request.WindowMinutes, 5, 120);
         var strideMinutes = Math.Clamp(request.StrideMinutes, 1, windowMinutes);
         var slices = Math.Max(1, (int)Math.Ceiling(windowMinutes / (double)strideMinutes));
@@ -443,10 +463,18 @@ public sealed class EcgAuthService : IEcgAuthService
         var hrv = await _fitbit.GetDailyHrvAsync(accessToken, DateOnly.FromDateTime(DateTime.UtcNow), ct);
         var readings = await _fitbit.GetRecentEcgsAsync(accessToken, perRequestLimit, DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), ct);
         if (readings.Count == 0)
-            throw new InvalidOperationException("No ECG waveform found. Ask the user to run an ECG recording on the watch.");
+        {
+            return new ContinuousVerifyResponse
+            {
+                Authenticated = false,
+                RollingMeanScore = 0d,
+                RollingWorstScore = 0d,
+                Samples = new List<ContinuousVerifySample>()
+            };
+        }
 
         var samples = new List<ContinuousVerifySample>();
-        var scores = new List<double>();
+        var evaluatedScores = new List<double>();
         foreach (var reading in readings.OrderBy(r => r.StartTime ?? DateTimeOffset.MinValue))
         {
             if (reading?.WaveFormSamples == null || reading.WaveFormSamples.Count == 0)
@@ -458,7 +486,19 @@ public sealed class EcgAuthService : IEcgAuthService
             var embedding = _embedding.GenerateEmbedding(reading.WaveFormSamples, scalingFactor, samplingHz);
             if (embedding is { Length: > 0 })
                 features = features with { EmbeddingVector = embedding };
-            EcgQualityRules.EnsureAcceptable(features);
+            var windowStart = reading.StartTime ?? DateTimeOffset.UtcNow;
+            var windowEnd = windowStart.AddMinutes(strideMinutes);
+            if (!EcgQualityRules.IsAcceptable(features))
+            {
+                samples.Add(new ContinuousVerifySample
+                {
+                    WindowStartUtc = windowStart,
+                    WindowEndUtc = windowEnd,
+                    Score = 0d,
+                    Passes = false
+                });
+                continue;
+            }
 
             var summary = await ScoreAttemptAsync(
                 userId,
@@ -466,6 +506,7 @@ public sealed class EcgAuthService : IEcgAuthService
                 reading.StartTime,
                 hrv,
                 threshold,
+                requireSeparation,
                 ct,
                 baselineSessions,
                 impostorSessions);
@@ -473,22 +514,19 @@ public sealed class EcgAuthService : IEcgAuthService
             await LogVerificationAttemptAsync(summary, ct);
             samples.Add(new ContinuousVerifySample
             {
-                WindowStartUtc = reading.StartTime ?? DateTimeOffset.UtcNow,
-                WindowEndUtc = (reading.StartTime ?? DateTimeOffset.UtcNow).AddMinutes(strideMinutes),
+                WindowStartUtc = windowStart,
+                WindowEndUtc = windowEnd,
                 Score = summary.Result.Score,
                 Passes = summary.Result.Authenticated
             });
-            scores.Add(summary.Result.Score);
+            evaluatedScores.Add(summary.Result.Score);
         }
-
-        if (samples.Count == 0)
-            throw new InvalidOperationException("Unable to evaluate ECG stream. Ensure new Fitbit ECG traces are available.");
 
         return new ContinuousVerifyResponse
         {
             Authenticated = samples.Count > 0 && samples.All(s => s.Passes),
-            RollingMeanScore = scores.Average(),
-            RollingWorstScore = scores.Min(),
+            RollingMeanScore = evaluatedScores.Count > 0 ? evaluatedScores.Average() : 0d,
+            RollingWorstScore = evaluatedScores.Count > 0 ? evaluatedScores.Min() : 0d,
             Samples = samples
         };
     }
@@ -742,6 +780,7 @@ public sealed class EcgAuthService : IEcgAuthService
         DateTimeOffset? startTime,
         double? hrv,
         double threshold,
+        bool requireSeparation,
         CancellationToken ct,
         IReadOnlyList<EcgSession>? cachedSessions = null,
         IReadOnlyList<EcgSession>? cachedImpostorSessions = null)
@@ -775,20 +814,7 @@ public sealed class EcgAuthService : IEcgAuthService
                 latestScore = score;
         }
 
-        var appliedThreshold = threshold <= 0 ? DefaultThreshold : threshold;
-        var orderedScores = scores.OrderByDescending(s => s).ToList();
-        var topK = Math.Min(ScoreConsensusTopK, orderedScores.Count);
-        var topScores = orderedScores.Take(topK).ToList();
-        var consensusScore = topScores.Count > 0 ? topScores.Average() : 0d;
-        var bestScore = orderedScores.Count > 0 ? orderedScores[0] : 0d;
-        var worstScore = orderedScores.Count > 0 ? orderedScores[^1] : 0d;
-        var medianScore = ComputeMedian(scores);
-        var passingVotes = scores.Count(s => s >= appliedThreshold);
-        var passRatio = scores.Count > 0 ? passingVotes / (double)scores.Count : 0d;
-        var latestPasses = latestScore is not null && latestScore.Value >= appliedThreshold;
-        var outlierFloor = Math.Max(0d, appliedThreshold - MaxOutlierDrop);
-        var noExtremeOutlier = worstScore >= outlierFloor;
-
+        var appliedThreshold = threshold <= 0 ? _defaultThreshold : threshold;
         IReadOnlyList<EcgSession> impostorSessions;
         if (cachedImpostorSessions is null)
         {
@@ -812,17 +838,55 @@ public sealed class EcgAuthService : IEcgAuthService
             impostorScores.Add(score);
         }
 
-        var orderedImpostorScores = impostorScores.OrderByDescending(s => s).ToList();
+        var impostorMean = impostorScores.Count > 0 ? impostorScores.Average() : 0d;
+        var impostorStd = ComputeStdDev(impostorScores);
+        var scoredCalibrated = _scoreCalibrationEnabled
+            ? scores.Select(s => CalibrateScore(s, impostorMean, impostorStd, _calibrationTemperature, _impostorZNormWeight, _impostorStdFloor)).ToList()
+            : scores.ToList();
+        var latestCalibrated = latestScore is null
+            ? (double?)null
+            : (_scoreCalibrationEnabled
+                ? CalibrateScore(latestScore.Value, impostorMean, impostorStd, _calibrationTemperature, _impostorZNormWeight, _impostorStdFloor)
+                : latestScore.Value);
+        var calibratedImpostorScores = _scoreCalibrationEnabled
+            ? impostorScores.Select(s => CalibrateScore(s, impostorMean, impostorStd, _calibrationTemperature, _impostorZNormWeight, _impostorStdFloor)).ToList()
+            : impostorScores.ToList();
+
+        var orderedScores = scoredCalibrated.OrderByDescending(s => s).ToList();
+        var topK = Math.Min(ScoreConsensusTopK, orderedScores.Count);
+        var topScores = orderedScores.Take(topK).ToList();
+        var consensusScore = topScores.Count > 0 ? topScores.Average() : 0d;
+        var bestScore = orderedScores.Count > 0 ? orderedScores[0] : 0d;
+        var worstScore = orderedScores.Count > 0 ? orderedScores[^1] : 0d;
+        var medianScore = ComputeMedian(scoredCalibrated);
+        var passingVotes = scoredCalibrated.Count(s => s >= appliedThreshold);
+        var passRatio = scoredCalibrated.Count > 0 ? passingVotes / (double)scoredCalibrated.Count : 0d;
+        var latestPasses = latestCalibrated is not null && latestCalibrated.Value >= appliedThreshold;
+        var outlierFloor = Math.Max(0d, appliedThreshold - MaxOutlierDrop);
+        var noExtremeOutlier = worstScore >= outlierFloor;
+
+        var orderedImpostorScores = calibratedImpostorScores.OrderByDescending(s => s).ToList();
         var impostorBestScore = orderedImpostorScores.Count > 0 ? orderedImpostorScores[0] : 0d;
         var impostorTopK = Math.Min(ImpostorConsensusTopK, orderedImpostorScores.Count);
         var impostorConsensusScore = impostorTopK > 0
             ? orderedImpostorScores.Take(impostorTopK).Average()
             : 0d;
+        var impostorMedianScore = orderedImpostorScores.Count > 0 ? ComputeMedian(orderedImpostorScores) : 0d;
+        var impostorPassingVotes = orderedImpostorScores.Count(s => s >= appliedThreshold);
         var bestSeparation = bestScore - impostorBestScore;
         var consensusSeparation = consensusScore - impostorConsensusScore;
         var separationPasses = orderedImpostorScores.Count == 0 ||
                                (bestSeparation >= MinimumGenuineImpostorMargin &&
                                 consensusSeparation >= MinimumGenuineImpostorMargin);
+
+        // Additional impostor checks
+        bool impostorChecksPass = true;
+        if (impostorBestScore >= ImpostorScoreThreshold) impostorChecksPass = false;
+        if (impostorConsensusScore >= ImpostorScoreThreshold) impostorChecksPass = false;
+        if (impostorMedianScore >= ImpostorScoreThreshold) impostorChecksPass = false;
+        if (impostorPassingVotes > 0) impostorChecksPass = false;
+        if (impostorBestScore > 0 && bestScore / impostorBestScore <= MinimumSeparationRatio) impostorChecksPass = false;
+        if (bestSeparation < MinimumConsensusSeparation || consensusSeparation < MinimumConsensusSeparation) impostorChecksPass = false;
 
         var authenticated = latestPasses &&
                             bestScore >= appliedThreshold &&
@@ -830,7 +894,8 @@ public sealed class EcgAuthService : IEcgAuthService
                             medianScore >= appliedThreshold &&
                             passRatio >= MinimumPassingRatio &&
                             noExtremeOutlier &&
-                            separationPasses;
+                            (!requireSeparation || separationPasses) &&
+                            impostorChecksPass;
 
         ConfidenceSnapshot? confidence = null;
         try
@@ -849,7 +914,7 @@ public sealed class EcgAuthService : IEcgAuthService
             appliedThreshold,
             startTime,
             hrv,
-            scores,
+            scoredCalibrated,
             consensusScore,
             passingVotes,
             confidence,
@@ -874,6 +939,26 @@ public sealed class EcgAuthService : IEcgAuthService
             worstScore,
             outlierFloor,
             separationPasses);
+    }
+
+    private bool ResolveRequireSeparation()
+    {
+        if (!_allowRelaxedSeparationOverride)
+            return _requireSeparation;
+
+        var httpContext = _httpContextAccessor?.HttpContext;
+        if (httpContext?.Request.Headers.TryGetValue("X-Require-Separation", out var separationHeader) != true)
+            return _requireSeparation;
+
+        var raw = separationHeader.ToString()?.Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+            return _requireSeparation;
+
+        if (bool.TryParse(raw, out var parsed))
+            return parsed;
+
+        return raw.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               raw.Equals("yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private Task LogVerificationAttemptAsync(VerificationSummary summary, CancellationToken ct)
@@ -1073,6 +1158,48 @@ public sealed class EcgAuthService : IEcgAuthService
             return (ordered[mid - 1] + ordered[mid]) / 2d;
 
         return ordered[mid];
+    }
+
+    private static double ComputeStdDev(IReadOnlyList<double> values)
+    {
+        if (values is null || values.Count < 2)
+            return 0d;
+
+        var mean = values.Average();
+        var variance = values.Sum(v => (v - mean) * (v - mean)) / (values.Count - 1);
+        return variance > 0 ? Math.Sqrt(variance) : 0d;
+    }
+
+    private static double CalibrateScore(
+        double rawScore,
+        double impostorMean,
+        double impostorStd,
+        double temperature,
+        double zNormWeight,
+        double stdFloor)
+    {
+        rawScore = Math.Clamp(rawScore, 1e-6, 1 - 1e-6);
+        var logit = Math.Log(rawScore / (1 - rawScore));
+        var temperatureScaled = Sigmoid(logit / Math.Max(1.0, temperature));
+
+        var denom = Math.Max(stdFloor, impostorStd);
+        var z = (rawScore - impostorMean) / denom;
+        var zNormScore = Sigmoid(z);
+
+        var mixed = (1 - zNormWeight) * temperatureScaled + zNormWeight * zNormScore;
+        return Math.Clamp(mixed, 0d, 1d);
+    }
+
+    private static double Sigmoid(double x)
+    {
+        if (x >= 0)
+        {
+            var z = Math.Exp(-x);
+            return 1d / (1d + z);
+        }
+
+        var w = Math.Exp(x);
+        return w / (1d + w);
     }
 
     private PredictionEngine<PairRow, PairPrediction> CreatePredictionEngine()

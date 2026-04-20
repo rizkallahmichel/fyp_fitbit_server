@@ -129,6 +129,7 @@ public interface IEcgMlTrainer
 public sealed class EcgMlTrainer : IEcgMlTrainer
 {
     private const string AutoVerifyTag = "auto-verify";
+    private const string VerifyAttemptTag = "verify-attempt";
     private const string FalseAttemptTag = "false-attempt";
     private const string ImpostorTag = "impostor";
     private readonly FirestoreDb _db;
@@ -159,14 +160,16 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         if (sessions.Count < 10)
             throw new InvalidOperationException("Collect at least 10 ECG sessions before training.");
 
-        var pairs = BuildPairDataset(sessions, maxPairsPerUser);
-        if (pairs.Count < 100)
+        var clampedFraction = Math.Clamp(testFraction, 0.05, 0.9);
+        var (trainSessions, testSessions) = SplitSessionsByUser(sessions, clampedFraction);
+        var trainPairs = BuildPairDataset(trainSessions, maxPairsPerUser);
+        var testPairs = BuildPairDataset(testSessions, maxPairsPerUser);
+        if (trainPairs.Count < 100 || testPairs.Count < 40)
             throw new InvalidOperationException("Not enough training pairs. Gather more sessions across multiple users.");
 
         var ml = new MLContext(seed: 42);
-        var data = ml.Data.LoadFromEnumerable(pairs);
-        var clampedFraction = Math.Clamp(testFraction, 0.05, 0.9);
-        var split = ml.Data.TrainTestSplit(data, testFraction: clampedFraction);
+        var trainData = ml.Data.LoadFromEnumerable(trainPairs);
+        var testData = ml.Data.LoadFromEnumerable(testPairs);
 
         var featureColumns = new[]
         {
@@ -217,8 +220,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             .Append(ml.Transforms.NormalizeMinMax("Features"))
             .Append(trainer);
 
-        var model = pipeline.Fit(split.TrainSet);
-        var predictions = model.Transform(split.TestSet);
+        var model = pipeline.Fit(trainData);
+        var predictions = model.Transform(testData);
 
         var scoredRows = ml.Data
             .CreateEnumerable<PairCorrectionRow>(predictions, reuseRowObject: false)
@@ -233,10 +236,10 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         var metrics = ml.BinaryClassification.Evaluate(predictions);
 
         Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
-        ml.Model.Save(model, split.TrainSet.Schema, modelPath);
+        ml.Model.Save(model, trainData.Schema, modelPath);
 
         var correctionModelPath = BuildCorrectionModelPath(modelPath);
-        TrainCorrectionModel(ml, model, split.TrainSet, correctionModelPath);
+        TrainCorrectionModel(ml, model, trainData, correctionModelPath);
 
         return new ModelTrainingResult(
             modelPath,
@@ -245,7 +248,7 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             metrics.AreaUnderRocCurve,
             metrics.F1Score,
             sessions.Count,
-            pairs.Count);
+            trainPairs.Count + testPairs.Count);
     }
 
     private static string BuildCorrectionModelPath(string modelPath)
@@ -328,6 +331,8 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             if (!payload.TryGetValue("fitbitUserId", out var userObj) || userObj is null)
                 continue;
             if (HasTag(payload, AutoVerifyTag))
+                continue;
+            if (HasTag(payload, VerifyAttemptTag))
                 continue;
 
             var dataSource = EcgDataSource.Resolve(payload);
@@ -505,6 +510,33 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
             _ => null
         };
     }
+    private static (List<EcgSession> Train, List<EcgSession> Test) SplitSessionsByUser(IReadOnlyList<EcgSession> sessions, double testFraction)
+    {
+        var train = new List<EcgSession>();
+        var test = new List<EcgSession>();
+
+        var grouped = sessions
+            .GroupBy(
+                s => s.IsKnownImpostorForClaimedUser ? NormalizeClaimedUserId(s.FitbitUserId) : s.FitbitUserId,
+                StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var group in grouped)
+        {
+            var ordered = group
+                .OrderByDescending(s => s.CollectedAtUtc ?? DateTimeOffset.MinValue)
+                .ToList();
+            if (ordered.Count < 4)
+                continue;
+
+            var testCount = Math.Clamp((int)Math.Round(ordered.Count * testFraction), 1, ordered.Count - 2);
+            test.AddRange(ordered.Take(testCount));
+            train.AddRange(ordered.Skip(testCount));
+        }
+
+        return (train, test);
+    }
+
     private static List<PairRow> BuildPairDataset(IReadOnlyList<EcgSession> sessions, int maxPairsPerUser)
     {
         var genuineByUser = sessions
@@ -515,7 +547,7 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
 
         var hardNegativesByClaimedUser = sessions
             .Where(s => s.IsKnownImpostorForClaimedUser)
-            .GroupBy(s => s.FitbitUserId)
+            .GroupBy(s => NormalizeClaimedUserId(s.FitbitUserId))
             .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.CollectedAtUtc ?? DateTimeOffset.MinValue).ToList());
 
         if (genuineByUser.Count < 2)
@@ -551,6 +583,19 @@ public sealed class EcgMlTrainer : IEcgMlTrainer
         }
 
         return rows;
+    }
+
+    private static string NormalizeClaimedUserId(string userId)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+            return string.Empty;
+
+        var marker = "#impostor";
+        var idx = userId.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx <= 0)
+            return userId;
+
+        return userId[..idx];
     }
 
     private static List<(EcgSession A, EcgSession B)> GenerateDistinctPairs(IReadOnlyList<EcgSession> sessions)
