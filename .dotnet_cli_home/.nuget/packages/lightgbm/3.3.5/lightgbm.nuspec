@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
+  <metadata>
+    <id>LightGBM</id>
+    <version>3.3.5</version>
+    <authors>Guolin Ke</authors>
+    <owners>Guolin Ke</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <projectUrl>https://github.com/microsoft/LightGBM</projectUrl>
+    <description>A fast, distributed, high performance gradient boosting framework</description>
+    <copyright>Copyright 2023 @ Microsoft</copyright>
+    <tags>machine-learning data-mining distributed native boosting gbdt</tags>
+  </metadata>
+</package>
