@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
@@ -9,10 +10,12 @@ namespace FitServer.Controllers
     public class FitbitController : ControllerBase
     {
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IConfiguration _configuration;
 
-        public FitbitController(IHttpClientFactory httpClientFactory)
+        public FitbitController(IHttpClientFactory httpClientFactory, IConfiguration configuration)
         {
             _httpClientFactory = httpClientFactory;
+            _configuration = configuration;
         }
 
         [HttpGet("hrv")]
@@ -47,11 +50,12 @@ namespace FitServer.Controllers
 
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
             var afterDate = today.AddDays(-30);
+            var tokenScopes = await TryGetTokenScopesAsync(accessToken);
 
             var sections = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
             {
                 ["profile"] = await FetchSectionSummaryAsync(client, "profile", "https://api.fitbit.com/1/user/-/profile.json"),
-                ["ecgList"] = await FetchSectionSummaryAsync(client, "ecgList", $"https://api.fitbit.com/1/user/-/ecg/list.json?afterDate={afterDate:yyyy-MM-dd}&sort=desc&limit=20&offset=0"),
+                ["ecgList"] = await FetchSectionSummaryAsync(client, "ecgList", $"https://api.fitbit.com/1/user/-/ecg/list.json?afterDate={afterDate:yyyy-MM-dd}&sort=desc&limit=10&offset=0"),
                 ["hrv"] = await FetchSectionSummaryAsync(client, "hrv", $"https://api.fitbit.com/1/user/-/hrv/date/{today:yyyy-MM-dd}.json"),
                 ["heartDaily"] = await FetchSectionSummaryAsync(client, "heartDaily", $"https://api.fitbit.com/1/user/-/activities/heart/date/{today:yyyy-MM-dd}/1d.json"),
                 ["heartIntraday"] = await FetchSectionSummaryAsync(client, "heartIntraday", $"https://api.fitbit.com/1/user/-/activities/heart/date/{today:yyyy-MM-dd}/1d/1sec.json"),
@@ -60,6 +64,7 @@ namespace FitServer.Controllers
                 ["breathingRate"] = await FetchSectionSummaryAsync(client, "breathingRate", $"https://api.fitbit.com/1/user/-/br/date/{today:yyyy-MM-dd}/{today:yyyy-MM-dd}.json"),
                 ["skinTemperature"] = await FetchSectionSummaryAsync(client, "skinTemperature", $"https://api.fitbit.com/1/user/-/temp/skin/date/{today:yyyy-MM-dd}.json")
             };
+            AttachScopeHints(sections, tokenScopes);
 
             var totalSections = sections.Count;
             var okSections = sections.Values.Count(IsSectionOk);
@@ -68,6 +73,10 @@ namespace FitServer.Controllers
             {
                 dateUtc = DateTime.UtcNow,
                 source = "fitbit-live-summary",
+                auth = new
+                {
+                    scopes = tokenScopes
+                },
                 totals = new
                 {
                     totalSections,
@@ -76,6 +85,104 @@ namespace FitServer.Controllers
                 },
                 sections
             });
+        }
+
+        private async Task<string[]> TryGetTokenScopesAsync(string accessToken)
+        {
+            try
+            {
+                var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+                var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
+                if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
+                    return Array.Empty<string>();
+
+                var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+                using var client = _httpClientFactory.CreateClient();
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
+                using var content = new FormUrlEncodedContent(new Dictionary<string, string> { ["token"] = accessToken });
+                using var response = await client.PostAsync("https://api.fitbit.com/1.1/oauth2/introspect", content);
+                if (!response.IsSuccessStatusCode)
+                    return Array.Empty<string>();
+
+                var payload = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(payload);
+                if (!doc.RootElement.TryGetProperty("scope", out var scopeElement) || scopeElement.ValueKind != JsonValueKind.String)
+                    return Array.Empty<string>();
+
+                return NormalizeScopes(scopeElement.GetString());
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        private static string[] NormalizeScopes(string? rawScopes)
+        {
+            if (string.IsNullOrWhiteSpace(rawScopes))
+                return Array.Empty<string>();
+
+            // Fitbit introspection can return either space-separated scopes
+            // or a map-like string: "{ELECTROCARDIOGRAM=READ, HEARTRATE=READ, PROFILE=READ}"
+            var normalized = rawScopes.Trim().TrimStart('{').TrimEnd('}');
+            var mapStyleParts = normalized.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var scopes = new List<string>();
+
+            foreach (var part in mapStyleParts)
+            {
+                var token = part;
+                var eqIdx = token.IndexOf('=');
+                if (eqIdx > 0)
+                    token = token.Substring(0, eqIdx);
+
+                token = token.Trim().ToLowerInvariant();
+                if (!string.IsNullOrWhiteSpace(token))
+                    scopes.Add(token);
+            }
+
+            if (scopes.Count == 0)
+            {
+                scopes.AddRange(rawScopes
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(s => s.Trim().ToLowerInvariant()));
+            }
+
+            return scopes.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static void AttachScopeHints(Dictionary<string, object?> sections, IReadOnlyCollection<string> scopes)
+        {
+            var requiredScopes = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["profile"] = new[] { "profile" },
+                ["ecgList"] = new[] { "electrocardiogram" },
+                ["hrv"] = new[] { "heartrate" },
+                ["heartDaily"] = new[] { "heartrate" },
+                ["heartIntraday"] = new[] { "heartrate" },
+                ["steps"] = new[] { "activity" },
+                ["sleep"] = new[] { "sleep" },
+                ["breathingRate"] = new[] { "respiratory_rate" },
+                ["skinTemperature"] = new[] { "temperature" }
+            };
+
+            foreach (var key in sections.Keys.ToArray())
+            {
+                if (!requiredScopes.TryGetValue(key, out var required))
+                    continue;
+
+                var missing = required.Where(s => !scopes.Contains(s, StringComparer.OrdinalIgnoreCase)).ToArray();
+                if (missing.Length == 0)
+                    continue;
+
+                sections[key] = new
+                {
+                    ok = false,
+                    statusCode = 403,
+                    error = $"Missing OAuth scope(s): {string.Join(", ", missing)}",
+                    requiredScopes = required,
+                    grantedScopes = scopes.ToArray()
+                };
+            }
         }
 
         private static async Task<object> FetchSectionSummaryAsync(HttpClient client, string sectionName, string url)

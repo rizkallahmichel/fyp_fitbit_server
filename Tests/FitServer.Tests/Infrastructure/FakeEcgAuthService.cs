@@ -62,6 +62,30 @@ public sealed class FakeEcgAuthService : IEcgAuthService
         return Task.FromResult(sessions);
     }
 
+    public Task<IReadOnlyList<VerificationLogRecord>> GetVerificationLogsAsync(string? fitbitUserId = null, int limit = 100, CancellationToken ct = default)
+    {
+        IReadOnlyList<VerificationLogRecord> logs = new[]
+        {
+            new VerificationLogRecord
+            {
+                Id = "log-1",
+                FitbitUserId = fitbitUserId ?? "user-123",
+                AttemptedAtUtc = DateTimeOffset.UtcNow,
+                EcgStartTimeUtc = DateTimeOffset.UtcNow,
+                Score = 0.91,
+                Threshold = 0.85,
+                Authenticated = true,
+                ConsensusScore = 0.9,
+                VotesPassing = 3,
+                ComparisonCount = 5,
+                ConfidenceLevel = 0.92,
+                ConfidenceDrift = 0.03,
+                ConfidenceSamples = 20
+            }
+        };
+        return Task.FromResult(logs);
+    }
+
     public Task<EcgDataOverviewResponse> GetDataOverviewAsync(CancellationToken ct = default)
     {
         var response = new EcgDataOverviewResponse

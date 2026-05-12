@@ -1,5 +1,6 @@
 using FitServer.Models;
 using FitServer.Services;
+using Grpc.Core;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FitServer.Controllers;
@@ -31,6 +32,16 @@ public sealed class EcgAuthController : ControllerBase
         {
             return BadRequest(ex.Message);
         }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
+        }
     }
 
     [HttpPost("train")]
@@ -55,6 +66,16 @@ public sealed class EcgAuthController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(ex.Message);
+        }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
         }
     }
 
@@ -86,30 +107,82 @@ public sealed class EcgAuthController : ControllerBase
     [HttpGet("sessions")]
     public async Task<IActionResult> GetSessions(CancellationToken ct)
     {
-        var sessions = await _authService.GetSessionsAsync(ct);
-        return Ok(sessions);
+        try
+        {
+            var sessions = await _authService.GetSessionsAsync(ct);
+            return Ok(sessions);
+        }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
+        }
     }
 
     [HttpGet("logs")]
     public async Task<IActionResult> GetLogs([FromQuery] string? fitbitUserId = null, [FromQuery] int limit = 100, CancellationToken ct = default)
     {
-        var logs = await _authService.GetVerificationLogsAsync(fitbitUserId, limit, ct);
-        return Ok(logs);
+        try
+        {
+            var logs = await _authService.GetVerificationLogsAsync(fitbitUserId, limit, ct);
+            return Ok(logs);
+        }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
+        }
     }
 
     [HttpGet("data-overview")]
     public async Task<IActionResult> GetDataOverview(CancellationToken ct)
     {
-        var overview = await _authService.GetDataOverviewAsync(ct);
-        return Ok(overview);
+        try
+        {
+            var overview = await _authService.GetDataOverviewAsync(ct);
+            return Ok(overview);
+        }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
+        }
     }
 
     [HttpPost("benchmark-ecg-id")]
     public async Task<IActionResult> BenchmarkEcgId([FromBody] EcgBenchmarkRequest? request, CancellationToken ct = default)
     {
-        var payload = request ?? new EcgBenchmarkRequest();
-        var result = await _authService.BenchmarkEcgIdAsync(payload, ct);
-        return Ok(result);
+        try
+        {
+            var payload = request ?? new EcgBenchmarkRequest();
+            var result = await _authService.BenchmarkEcgIdAsync(payload, ct);
+            return Ok(result);
+        }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+        catch (RpcException ex) when (IsFirestorePermissionDenied(ex))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden,
+                "Firestore permission denied. Verify the active service account has Firestore access in the configured Google project.");
+        }
     }
 
     [HttpPost("report-false-attempt")]
@@ -125,5 +198,22 @@ public sealed class EcgAuthController : ControllerBase
         {
             return BadRequest(ex.Message);
         }
+        catch (RpcException ex) when (IsGoogleCredentialFailure(ex))
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                "Firestore authentication failed. Check Google service-account credentials (invalid JWT signature).");
+        }
+    }
+
+    private static bool IsGoogleCredentialFailure(RpcException ex)
+    {
+        return ex.StatusCode == Grpc.Core.StatusCode.Internal &&
+               ex.Status.Detail?.Contains("invalid_grant", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool IsFirestorePermissionDenied(RpcException ex)
+    {
+        return ex.StatusCode == Grpc.Core.StatusCode.PermissionDenied ||
+               ex.Status.Detail?.Contains("Missing or insufficient permissions", StringComparison.OrdinalIgnoreCase) == true;
     }
 }

@@ -139,4 +139,33 @@ public class EcgAuthControllerTests : IClassFixture<TestApplicationFactory>
         Assert.Equal("BTNYKG", _service.LastFalseAttemptRequest!.FitbitUserId);
         Assert.Equal(timestamp, _service.LastFalseAttemptRequest.EcgStartTime);
     }
+
+    [Fact]
+    public async Task UserJourney_CollectTrainVerifyAndLogs_WorksEndToEnd()
+    {
+        _service.Reset();
+
+        var collectRequest = new HttpRequestMessage(HttpMethod.Post, "/api/ecg-auth/collect-session")
+        {
+            Content = JsonContent.Create(new SessionCaptureRequest { Notes = "journey" })
+        };
+        collectRequest.Headers.Add("X-Test-AccessToken", "token");
+        var collectResponse = await _client.SendAsync(collectRequest);
+        collectResponse.EnsureSuccessStatusCode();
+
+        var trainResponse = await _client.PostAsync("/api/ecg-auth/train?maxPairsPerUser=500", null);
+        trainResponse.EnsureSuccessStatusCode();
+
+        var verifyRequest = new HttpRequestMessage(HttpMethod.Post, "/api/ecg-auth/verify?threshold=0.9");
+        verifyRequest.Headers.Add("X-Test-AccessToken", "token");
+        var verifyResponse = await _client.SendAsync(verifyRequest);
+        verifyResponse.EnsureSuccessStatusCode();
+
+        var logsResponse = await _client.GetAsync("/api/ecg-auth/logs");
+        logsResponse.EnsureSuccessStatusCode();
+
+        Assert.Equal("journey", _service.LastCaptureRequest?.Notes);
+        var verifyPayload = await verifyResponse.Content.ReadAsStringAsync();
+        Assert.Contains("authenticated", verifyPayload);
+    }
 }
