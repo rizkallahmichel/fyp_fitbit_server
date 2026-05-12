@@ -40,6 +40,7 @@ set Fitbit:DisableAuthMiddleware=true
 ## Build & Run
 ```bash
 # Restore and build
+dotnet restore
 dotnet build
 
 # Run the API (launches Swagger at http://localhost:5104 by default)
@@ -47,6 +48,14 @@ dotnet run --project FitServer.csproj
 ```
 
 While developing automated tests, you can bypass Fitbit OAuth by setting `Fitbit:DisableAuthMiddleware=true` and sending an `X-Test-AccessToken` header (used by the integration test harness).
+
+## Quick Start
+
+git clone https://github.com/rizkallahmichel/fyp_fitbit_server.git
+cd fyp_fitbit_server
+dotnet restore
+dotnet build
+dotnet run --project FitServer.csproj
 
 ## Useful Diagnostic Endpoint
 

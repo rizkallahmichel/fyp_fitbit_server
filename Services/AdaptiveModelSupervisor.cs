@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
+using Grpc.Core;
 
 namespace FitServer.Services;
 
@@ -9,18 +11,21 @@ public sealed class AdaptiveModelSupervisor : BackgroundService
     private readonly IEcgModelStateRepository _stateRepository;
     private readonly IWebHostEnvironment _environment;
     private readonly IOptionsMonitor<AdaptiveModelOptions> _options;
+    private readonly ILogger<AdaptiveModelSupervisor> _logger;
     private string? _modelPath;
 
     public AdaptiveModelSupervisor(
         IEcgMlTrainer trainer,
         IEcgModelStateRepository stateRepository,
         IWebHostEnvironment environment,
-        IOptionsMonitor<AdaptiveModelOptions> options)
+        IOptionsMonitor<AdaptiveModelOptions> options,
+        ILogger<AdaptiveModelSupervisor> logger)
     {
         _trainer = trainer;
         _stateRepository = stateRepository;
         _environment = environment;
         _options = options;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -34,7 +39,23 @@ public sealed class AdaptiveModelSupervisor : BackgroundService
                 continue;
             }
 
-            await EvaluateAsync(stoppingToken);
+            try
+            {
+                await EvaluateAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (RpcException ex) when (ex.StatusCode == StatusCode.PermissionDenied)
+            {
+                _logger.LogError(ex, "Adaptive model supervisor stopped: Firestore permission denied for configured service account.");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Adaptive model evaluation failed; background worker will retry on next interval.");
+            }
             var delay = TimeSpan.FromMinutes(Math.Max(1, opts.CheckIntervalMinutes));
             try
             {

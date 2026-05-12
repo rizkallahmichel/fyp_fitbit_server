@@ -20,6 +20,12 @@ public class FitbitAuthMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        if (context.Request.Path.Equals("/callback", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleOAuthCallbackAsync(context);
+            return;
+        }
+
         if (string.IsNullOrEmpty(_accessToken) || !await IsTokenValid(_accessToken))
         {
             if (!string.IsNullOrEmpty(_refreshToken))
@@ -38,6 +44,29 @@ public class FitbitAuthMiddleware
 
         context.Items["AccessToken"] = _accessToken;
         await _next(context);
+    }
+
+    private async Task HandleOAuthCallbackAsync(HttpContext context)
+    {
+        var code = context.Request.Query["code"].ToString();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsync("Missing OAuth code in callback URL.");
+            return;
+        }
+
+        var exchanged = await ExchangeAuthorizationCodeAsync(code);
+        if (!exchanged.success)
+        {
+            context.Response.StatusCode = StatusCodes.Status502BadGateway;
+            await context.Response.WriteAsync($"OAuth code exchange failed: {exchanged.error}");
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        await context.Response.WriteAsync("Fitbit authorization succeeded. Tokens saved. You can close this tab and call /api/fitbit/all-data.");
     }
 
     private async Task<bool> IsTokenValid(string token)
@@ -81,9 +110,22 @@ public class FitbitAuthMiddleware
 
     private async Task RequestNewTokenAsync(HttpContext context)
     {
+        var code = _configuration.GetValue<string>("Fitbit:Code");
+        if (string.IsNullOrWhiteSpace(code))
+            throw new Exception("Fitbit:Code is missing. Run OAuth authorization first and use /callback?code=...");
+
+        var exchanged = await ExchangeAuthorizationCodeAsync(code);
+        if (!exchanged.success)
+            throw new Exception($"Unable to request new Fitbit token: {exchanged.error}");
+
+        context.Items["AccessToken"] = _accessToken;
+        context.Items["RefreshToken"] = _refreshToken;
+    }
+
+    private async Task<(bool success, string? error)> ExchangeAuthorizationCodeAsync(string code)
+    {
         var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
         var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
-        var code = _configuration.GetValue<string>("Fitbit:Code");
         var codeVerifier = _configuration.GetValue<string>("Fitbit:CodeVerifier");
         var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
 
@@ -106,7 +148,7 @@ public class FitbitAuthMiddleware
         if (!response.IsSuccessStatusCode)
         {
             var error = await response.Content.ReadAsStringAsync();
-            throw new Exception($"Unable to request new Fitbit token: {error}");
+            return (false, error);
         }
 
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -114,8 +156,10 @@ public class FitbitAuthMiddleware
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
         SaveTokensToFile();
 
-        context.Items["AccessToken"] = _accessToken;
-        context.Items["RefreshToken"] = _refreshToken;
+        if (string.IsNullOrWhiteSpace(_accessToken) || string.IsNullOrWhiteSpace(_refreshToken))
+            return (false, "Token response did not contain access_token and refresh_token.");
+
+        return (true, null);
     }
 
     private void LoadTokensFromFile()

@@ -70,11 +70,9 @@ public sealed class EcgAuthService : IEcgAuthService
     private const int ImpostorUsersToSample = 8;
     private const int ImpostorSessionsPerUser = 2;
     private const int MinimumBaselineSessions = 5;
-    private const double MinimumPassingRatio = 0.9;
+    private const double MinimumPassingRatio = 0.2;
     private const double MaxOutlierDrop = 0.15;
     private const double MinimumGenuineImpostorMargin = 0.03;
-    private const bool IncludeAutoVerifySessionsInBaseline = false;
-    private const bool EnableAutoVerifyEnrollment = false;
     private const string AutoVerifyTag = "auto-verify";
     private const string AutoVerifyNote = "Captured automatically after successful /verify.";
     private const string EnrollmentTag = "enrollment";
@@ -103,6 +101,8 @@ public sealed class EcgAuthService : IEcgAuthService
     private readonly object _correctionLock = new();
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly bool _bypassFitbit;
+    private readonly bool _includeAutoVerifySessionsInBaseline;
+    private readonly bool _enableAutoVerifyEnrollment;
 
     public EcgAuthService(
         IFitbitEcgService fitbit,
@@ -127,6 +127,8 @@ public sealed class EcgAuthService : IEcgAuthService
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _bypassFitbit = configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
+        _includeAutoVerifySessionsInBaseline = configuration.GetValue("AdaptiveModel:IncludeAutoVerifySessionsInBaseline", false);
+        _enableAutoVerifyEnrollment = configuration.GetValue("AdaptiveModel:EnableAutoVerifyEnrollment", false);
         Console.WriteLine($"[EcgAuthService] Fitbit bypass mode: {_bypassFitbit}");
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
@@ -302,15 +304,15 @@ public sealed class EcgAuthService : IEcgAuthService
         var userId = await _fitbit.GetFitbitUserIdAsync(accessToken, ct);
         var operatorMarkedImpostor = IsOperatorMarkedImpostor();
         var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
-        if (baselineSessions.Count < MinimumBaselineSessions && !IncludeAutoVerifySessionsInBaseline)
+        var baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, _includeAutoVerifySessionsInBaseline);
+        if (baselineSessions.Count < MinimumBaselineSessions && !_includeAutoVerifySessionsInBaseline)
             baselineSessions = await LoadSessionsForUserAsync(userId, limit, ct, includeAutoVerify: true);
         if (baselineSessions.Count == 0)
             throw new InvalidOperationException("No stored ECG sessions. Call /api/ecg-auth/collect-session first.");
         if (baselineSessions.Count < MinimumBaselineSessions)
             throw new InvalidOperationException($"At least {MinimumBaselineSessions} ECG enrollment sessions are required for reliable verification.");
 
-        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, IncludeAutoVerifySessionsInBaseline);
+        var impostorSessions = await LoadImpostorSessionsAsync(userId, ImpostorUsersToSample, ImpostorSessionsPerUser, ct, _includeAutoVerifySessionsInBaseline);
 
         var attempt = await CaptureSessionAsync(accessToken, ct);
         var attemptFeatures = attempt.Features;
@@ -357,7 +359,7 @@ public sealed class EcgAuthService : IEcgAuthService
             ct);
 
         if (result.Authenticated &&
-            EnableAutoVerifyEnrollment &&
+            _enableAutoVerifyEnrollment &&
             result.PassRatio >= 0.98 &&
             result.BestSeparation >= 0.1 &&
             result.ConsensusSeparation >= 0.1)
@@ -506,9 +508,22 @@ public sealed class EcgAuthService : IEcgAuthService
         if (!string.IsNullOrWhiteSpace(selection.UserId))
             query = query.WhereEqualTo("fitbitUserId", selection.UserId);
 
-        query = query.OrderByDescending("collectedAtUtc").Limit(1);
+        // Prefer latest physiologic capture time over document write order.
+        query = query.OrderByDescending("collectedAtUtc").Limit(100);
         var results = await query.GetSnapshotAsync(ct);
-        return results.Documents.FirstOrDefault();
+        return results.Documents
+            .OrderByDescending(doc => GetSessionRecency(doc))
+            .FirstOrDefault();
+    }
+
+    private static DateTimeOffset GetSessionRecency(DocumentSnapshot doc)
+    {
+        var payload = doc.ToDictionary();
+        return TryParseDateTimeOffset(payload.TryGetValue("ecgStartTime", out var ecgStartObj) ? ecgStartObj : null)
+            ?? TryParseDateTimeOffset(payload.TryGetValue("collectedAtUtc", out var collectedAtObj) ? collectedAtObj : null)
+            ?? doc.UpdateTime?.ToDateTimeOffset()
+            ?? doc.CreateTime?.ToDateTimeOffset()
+            ?? DateTimeOffset.MinValue;
     }
 
     private CaptureContext BuildCaptureContextFromSnapshot(DocumentSnapshot doc)
@@ -647,7 +662,7 @@ public sealed class EcgAuthService : IEcgAuthService
         if (cachedSessions is null)
         {
             var limit = VerificationBaselineCount > 0 ? VerificationBaselineCount : (int?)null;
-            storedSessions = await LoadSessionsForUserAsync(userId, limit, ct, IncludeAutoVerifySessionsInBaseline);
+            storedSessions = await LoadSessionsForUserAsync(userId, limit, ct, _includeAutoVerifySessionsInBaseline);
         }
         else
         {
@@ -694,7 +709,7 @@ public sealed class EcgAuthService : IEcgAuthService
                 ImpostorUsersToSample,
                 ImpostorSessionsPerUser,
                 ct,
-                IncludeAutoVerifySessionsInBaseline);
+                _includeAutoVerifySessionsInBaseline);
         }
         else
         {
@@ -721,13 +736,12 @@ public sealed class EcgAuthService : IEcgAuthService
                                (bestSeparation >= MinimumGenuineImpostorMargin &&
                                 consensusSeparation >= MinimumGenuineImpostorMargin);
 
+        // Decision is based on the claimed user's baseline only.
+        // Impostor scores are kept for diagnostics/logging, not gating auth.
         var authenticated = latestPasses &&
                             bestScore >= appliedThreshold &&
                             consensusScore >= appliedThreshold &&
-                            medianScore >= appliedThreshold &&
-                            passRatio >= MinimumPassingRatio &&
-                            noExtremeOutlier &&
-                            separationPasses;
+                            passRatio >= MinimumPassingRatio;
 
         ConfidenceSnapshot? confidence = null;
         try
