@@ -22,3 +22,8 @@ obj/
 
 # Settings
 appsettings.*.json
+
+# Google service account keys
+*fyp-assistant-*.json
+*fyp-auth-*.json
+
