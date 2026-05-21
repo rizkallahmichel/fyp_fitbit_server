@@ -6,34 +6,67 @@ using System.Text.Json;
 public class FitbitAuthMiddleware
 {
     private readonly RequestDelegate _next;
-    private static string? _accessToken = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyM1E4Tk4iLCJzdWIiOiJCVE5ZS0ciLCJpc3MiOiJGaXRiaXQiLCJ0eXAiOiJhY2Nlc3NfdG9rZW4iLCJzY29wZXMiOiJyYWN0IHJyZXMgcm94eSByaHIgcnBybyByc2xlIHJ0ZW0iLCJleHAiOjE3NDc1Mjk5OTIsImlhdCI6MTc0NzUwMTE5Mn0.DRo__W5y68mCps0Mdnlk4ZnUvR8bY_k_huvJ8wMEAGQ";
+    private static string? _accessToken;
     private static string? _refreshToken;
+    private readonly IConfiguration _configuration;
+    private readonly string tokenFilePath = "fitbit_tokens.json";
 
-    public FitbitAuthMiddleware(RequestDelegate next)
+    public FitbitAuthMiddleware(RequestDelegate next, IConfiguration configuration)
     {
         _next = next;
+        _configuration = configuration;
+        LoadTokensFromFile();
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
+        if (context.Request.Path.Equals("/callback", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleOAuthCallbackAsync(context);
+            return;
+        }
+
         if (string.IsNullOrEmpty(_accessToken) || !await IsTokenValid(_accessToken))
         {
             if (!string.IsNullOrEmpty(_refreshToken))
             {
-                var refreshed = await TryRefreshTokenAsync();
+                var refreshed = await TryRefreshTokenAsync(context);
                 if (!refreshed)
                 {
-                    await RequestNewTokenAsync(); // fallback to full flow
+                    await RequestNewTokenAsync(context);
                 }
             }
             else
             {
-                await RequestNewTokenAsync(); // initial token request
+                await RequestNewTokenAsync(context);
             }
         }
 
         context.Items["AccessToken"] = _accessToken;
         await _next(context);
+    }
+
+    private async Task HandleOAuthCallbackAsync(HttpContext context)
+    {
+        var code = context.Request.Query["code"].ToString();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsync("Missing OAuth code in callback URL.");
+            return;
+        }
+
+        var exchanged = await ExchangeAuthorizationCodeAsync(code);
+        if (!exchanged.success)
+        {
+            context.Response.StatusCode = StatusCodes.Status502BadGateway;
+            await context.Response.WriteAsync($"OAuth code exchange failed: {exchanged.error}");
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        await context.Response.WriteAsync("Fitbit authorization succeeded. Tokens saved. You can close this tab and call /api/fitbit/all-data.");
     }
 
     private async Task<bool> IsTokenValid(string token)
@@ -44,38 +77,62 @@ public class FitbitAuthMiddleware
         return response.IsSuccessStatusCode;
     }
 
-    private async Task<bool> TryRefreshTokenAsync()
+    private async Task<bool> TryRefreshTokenAsync(HttpContext context)
     {
-        var clientId = "23Q8NN";
-        var redirectUri = "http://localhost:8080/callback";
+        var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
+
+        var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             { "grant_type", "refresh_token" },
-            { "refresh_token", _refreshToken ?? string.Empty },
-            { "client_id", clientId }
+            { "refresh_token", _refreshToken ?? string.Empty }
         });
 
-        using var client = new HttpClient();
         var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
 
         if (!response.IsSuccessStatusCode)
-        {
             return false;
-        }
 
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        SaveTokensToFile();
+
+        context.Items["AccessToken"] = _accessToken;
+        context.Items["RefreshToken"] = _refreshToken;
         return true;
     }
 
-    private async Task RequestNewTokenAsync()
+    private async Task RequestNewTokenAsync(HttpContext context)
     {
-        var clientId = "23Q8NN";
-        var code = "28c00fce3cade29233f8c231b18a2e8784b4fc8f"; 
-        var codeVerifier = "81Oli40rwdNtdX6imBH80qtWVF1FHWSaiVJHz6g5O9A";
-        var redirectUri = "http://localhost:8080/callback";
+        var code = _configuration.GetValue<string>("Fitbit:Code");
+        if (string.IsNullOrWhiteSpace(code))
+            throw new Exception("Fitbit:Code is missing. Run OAuth authorization first and use /callback?code=...");
+
+        var exchanged = await ExchangeAuthorizationCodeAsync(code);
+        if (!exchanged.success)
+            throw new Exception($"Unable to request new Fitbit token: {exchanged.error}");
+
+        context.Items["AccessToken"] = _accessToken;
+        context.Items["RefreshToken"] = _refreshToken;
+    }
+
+    private async Task<(bool success, string? error)> ExchangeAuthorizationCodeAsync(string code)
+    {
+        var clientId = _configuration.GetValue<string>("Fitbit:ClientId");
+        var clientSecret = _configuration.GetValue<string>("Fitbit:ClientSecret");
+        var codeVerifier = _configuration.GetValue<string>("Fitbit:CodeVerifier");
+        var redirectUri = _configuration.GetValue<string>("Fitbit:RedirectUri");
+
+        var authHeader = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
 
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -86,17 +143,60 @@ public class FitbitAuthMiddleware
             { "code_verifier", codeVerifier }
         });
 
-        using var client = new HttpClient();
         var response = await client.PostAsync("https://api.fitbit.com/oauth2/token", content);
 
         if (!response.IsSuccessStatusCode)
         {
             var error = await response.Content.ReadAsStringAsync();
-            throw new Exception($"Unable to request new Fitbit token: {error}");
+            return (false, error);
         }
 
         var responseData = await response.Content.ReadFromJsonAsync<JsonElement>();
         _accessToken = responseData.GetProperty("access_token").GetString();
         _refreshToken = responseData.GetProperty("refresh_token").GetString();
+        SaveTokensToFile();
+
+        if (string.IsNullOrWhiteSpace(_accessToken) || string.IsNullOrWhiteSpace(_refreshToken))
+            return (false, "Token response did not contain access_token and refresh_token.");
+
+        return (true, null);
+    }
+
+    private void LoadTokensFromFile()
+    {
+        try
+        {
+            if (!File.Exists(tokenFilePath))
+                return;
+
+            var json = File.ReadAllText(tokenFilePath);
+            var data = JsonDocument.Parse(json).RootElement;
+
+            _accessToken = data.GetProperty("access_token").GetString();
+            _refreshToken = data.GetProperty("refresh_token").GetString();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to load tokens from file: {ex.Message}");
+        }
+    }
+
+    private void SaveTokensToFile()
+    {
+        try
+        {
+            var tokenData = new
+            {
+                access_token = _accessToken,
+                refresh_token = _refreshToken
+            };
+
+            var jsonStr = JsonSerializer.Serialize(tokenData, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(tokenFilePath, jsonStr);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to save tokens to file: {ex.Message}");
+        }
     }
 }
