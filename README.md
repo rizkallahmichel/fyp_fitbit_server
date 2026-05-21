@@ -35,7 +35,23 @@ set Fitbit:RedirectUri=https://your-app/callback
 set Fitbit:DisableAuthMiddleware=true
 ```
 
-`docs/ECG_AUTH.md` walks through the collection → training → verification workflow.
+`docs/ECG_AUTH.md` walks through the collection -> training -> verification workflow.
+
+ECG verification gates are configurable in `appsettings.*.json`:
+
+```json
+"EcgAuth": {
+  "MinimumPassingRatio": 0.6,
+  "MaxOutlierDrop": 0.15,
+  "MinimumGenuineImpostorMargin": 0.03,
+  "MaxLowOutlierCount": 2
+}
+```
+
+- `MinimumPassingRatio`: minimum fraction of comparisons that must be above threshold.
+- `MaxOutlierDrop`: low-outlier floor is `threshold - MaxOutlierDrop`.
+- `MaxLowOutlierCount`: allowed count of low outliers before auth fails.
+- `MinimumGenuineImpostorMargin`: required margin above impostor best/consensus scores.
 
 ## Build & Run
 ```bash
@@ -95,3 +111,4 @@ python tools/plot_train_metrics.py --scores bin\Debug\net9.0\reports\train_score
 
 python script to regenerate the EER diagram:
 python tools/generate_eer.py --mmd-output docs/eer/firestore_eer.mmd --md-output docs/EER.md
+

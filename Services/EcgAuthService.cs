@@ -70,9 +70,10 @@ public sealed class EcgAuthService : IEcgAuthService
     private const int ImpostorUsersToSample = 8;
     private const int ImpostorSessionsPerUser = 2;
     private const int MinimumBaselineSessions = 5;
-    private const double MinimumPassingRatio = 0.2;
-    private const double MaxOutlierDrop = 0.15;
-    private const double MinimumGenuineImpostorMargin = 0.03;
+    private const double DefaultMinimumPassingRatio = 0.6;
+    private const double DefaultMaxOutlierDrop = 0.15;
+    private const double DefaultMinimumGenuineImpostorMargin = 0.03;
+    private const int DefaultMaxLowOutlierCount = 2;
     private const string AutoVerifyTag = "auto-verify";
     private const string AutoVerifyNote = "Captured automatically after successful /verify.";
     private const string EnrollmentTag = "enrollment";
@@ -103,6 +104,10 @@ public sealed class EcgAuthService : IEcgAuthService
     private readonly bool _bypassFitbit;
     private readonly bool _includeAutoVerifySessionsInBaseline;
     private readonly bool _enableAutoVerifyEnrollment;
+    private readonly double _minimumPassingRatio;
+    private readonly double _maxOutlierDrop;
+    private readonly double _minimumGenuineImpostorMargin;
+    private readonly int _maxLowOutlierCount;
 
     public EcgAuthService(
         IFitbitEcgService fitbit,
@@ -129,6 +134,10 @@ public sealed class EcgAuthService : IEcgAuthService
         _bypassFitbit = configuration.GetValue("Fitbit:DisableAuthMiddleware", false);
         _includeAutoVerifySessionsInBaseline = configuration.GetValue("AdaptiveModel:IncludeAutoVerifySessionsInBaseline", false);
         _enableAutoVerifyEnrollment = configuration.GetValue("AdaptiveModel:EnableAutoVerifyEnrollment", false);
+        _minimumPassingRatio = Math.Clamp(configuration.GetValue("EcgAuth:MinimumPassingRatio", DefaultMinimumPassingRatio), 0d, 1d);
+        _maxOutlierDrop = Math.Max(0d, configuration.GetValue("EcgAuth:MaxOutlierDrop", DefaultMaxOutlierDrop));
+        _minimumGenuineImpostorMargin = Math.Max(0d, configuration.GetValue("EcgAuth:MinimumGenuineImpostorMargin", DefaultMinimumGenuineImpostorMargin));
+        _maxLowOutlierCount = Math.Max(0, configuration.GetValue("EcgAuth:MaxLowOutlierCount", DefaultMaxLowOutlierCount));
         Console.WriteLine($"[EcgAuthService] Fitbit bypass mode: {_bypassFitbit}");
         _modelPath = Path.Combine(environment.ContentRootPath, "ecg_auth_model.zip");
         _correctionModelPath = BuildCorrectionModelPath(_modelPath);
@@ -698,8 +707,9 @@ public sealed class EcgAuthService : IEcgAuthService
         var passingVotes = scores.Count(s => s >= appliedThreshold);
         var passRatio = scores.Count > 0 ? passingVotes / (double)scores.Count : 0d;
         var latestPasses = latestScore is not null && latestScore.Value >= appliedThreshold;
-        var outlierFloor = Math.Max(0d, appliedThreshold - MaxOutlierDrop);
-        var noExtremeOutlier = worstScore >= outlierFloor;
+        var outlierFloor = Math.Max(0d, appliedThreshold - _maxOutlierDrop);
+        var lowOutlierCount = scores.Count(s => s < outlierFloor);
+        var outlierPasses = lowOutlierCount <= _maxLowOutlierCount;
 
         IReadOnlyList<EcgSession> impostorSessions;
         if (cachedImpostorSessions is null)
@@ -733,15 +743,17 @@ public sealed class EcgAuthService : IEcgAuthService
         var bestSeparation = bestScore - impostorBestScore;
         var consensusSeparation = consensusScore - impostorConsensusScore;
         var separationPasses = orderedImpostorScores.Count == 0 ||
-                               (bestSeparation >= MinimumGenuineImpostorMargin &&
-                                consensusSeparation >= MinimumGenuineImpostorMargin);
+                               (bestSeparation >= _minimumGenuineImpostorMargin &&
+                                consensusSeparation >= _minimumGenuineImpostorMargin);
 
-        // Decision is based on the claimed user's baseline only.
-        // Impostor scores are kept for diagnostics/logging, not gating auth.
+        // Strict decision: require strong own-baseline agreement plus impostor separation.
         var authenticated = latestPasses &&
                             bestScore >= appliedThreshold &&
                             consensusScore >= appliedThreshold &&
-                            passRatio >= MinimumPassingRatio;
+                            medianScore >= appliedThreshold &&
+                            passRatio >= _minimumPassingRatio &&
+                            outlierPasses &&
+                            separationPasses;
 
         ConfidenceSnapshot? confidence = null;
         try

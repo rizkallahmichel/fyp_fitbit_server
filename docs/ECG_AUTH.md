@@ -45,6 +45,10 @@ The response contains accuracy, AUC, and F1. The trained file is saved to
    enrollment session.
 3. Evaluate FAR/FRR manually: run genuine attempts and impostor attempts, then
    adjust `threshold` to hit your target (e.g., operate near Equal Error Rate).
+4. Verification also applies additional safety gates from `EcgAuth` config (not threshold-only):
+   - minimum passing ratio across stored sessions
+   - impostor separation margin (best and consensus)
+   - low-outlier tolerance (`threshold - MaxOutlierDrop`, with up to `MaxLowOutlierCount` outliers)
 4. By default, verify calls do **not** auto-enroll captured waveforms. Use `/collect-session` for curated enrollment to avoid dataset poisoning.
 5. If one attempt is later confirmed as impostor, report it so retraining can use it as a hard negative:
    ```
@@ -62,6 +66,19 @@ The response contains accuracy, AUC, and F1. The trained file is saved to
 
 All verification attempts are logged to Firestore (`ecg_auth_logs`) so you can
 compute FAR/FRR offline later.
+
+## 4.1 EcgAuth tuning keys
+
+Add this section under your appsettings:
+
+```json
+"EcgAuth": {
+  "MinimumPassingRatio": 0.6,
+  "MaxOutlierDrop": 0.15,
+  "MinimumGenuineImpostorMargin": 0.03,
+  "MaxLowOutlierCount": 2
+}
+```
 
 ## 5. Benchmark ECG-ID protocol (Safie et al., 2024)
 
