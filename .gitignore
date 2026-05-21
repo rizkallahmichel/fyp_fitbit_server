@@ -24,3 +24,8 @@ TestResults/
 # Settings
 appsettings.*.json
 fyp-assistant-firebase.json
+
+# Google service account keys
+*fyp-assistant-*.json
+*fyp-auth-*.json
+
